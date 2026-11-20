@@ -166,6 +166,7 @@ def _fallback_args(name: str, ctx: ToolContext, query: str, candidates: list[dic
         if str(raw).isdigit():
             year = int(raw)
     common = {"query": query or title}
+    with_year = {"title": title, "year": year} if year is not None else {"title": title}
     mapping: dict[str, dict] = {
         "analyze_image": {},
         "analyze_multiple_images": {},
@@ -181,16 +182,40 @@ def _fallback_args(name: str, ctx: ToolContext, query: str, candidates: list[dic
         "search_youtube": {**common, "max_results": 5},
         "search_internet_archive": {**common, "max_results": 5},
         "search_telegram_authorized": common,
-        "verify_movie_identity": {"title": title, "year": year},
+        "verify_movie_identity": with_year,
         "calculate_confidence": {
             "title": title,
             "candidate": candidates[0] if candidates else {"title": title},
-            "year": year,
             "sources": [],
             "image_evidence": bool(ctx.images),
+            **({"year": year} if year is not None else {}),
         },
     }
     return mapping.get(name, common)
+
+
+DB_TOOLS = {
+    "search_catalog", "check_duplicate_movie", "save_movie", "update_movie",
+    "get_movie_details", "get_movie_sources", "find_authorized_media",
+    "check_distribution_rights", "download_authorized_media", "search_telegram_authorized",
+}
+
+
+async def _execute_tools(calls: list[tuple[str, dict]], ctx: ToolContext) -> list[dict]:
+    """Ejecuta tools de BD en serie y el resto en paralelo (AsyncSession no es concurrente)."""
+    results: list[Any] = [None] * len(calls)
+    parallel_idx = [i for i, (name, _) in enumerate(calls) if name not in DB_TOOLS]
+    db_idx = [i for i, (name, _) in enumerate(calls) if name in DB_TOOLS]
+    if parallel_idx:
+        gathered = await asyncio.gather(
+            *[registry.execute(calls[i][0], calls[i][1], ctx) for i in parallel_idx],
+            return_exceptions=True,
+        )
+        for i, res in zip(parallel_idx, gathered):
+            results[i] = res
+    for i in db_idx:
+        results[i] = await registry.execute(calls[i][0], calls[i][1], ctx)
+    return [r.as_dict() if hasattr(r, "as_dict") else {"error": str(r)} for r in results]
 
 
 async def _run_tool(name: str, args: dict, ctx: ToolContext, step: int) -> tuple[str, dict]:
@@ -260,17 +285,15 @@ async def run_agent(
                         args = {}
                     calls.append((call, args))
 
-                results = await asyncio.gather(
-                    *[registry.execute(c[0]["function"]["name"], c[1], ctx) for c in calls],
-                    return_exceptions=True,
+                payloads = await _execute_tools(
+                    [(c[0]["function"]["name"], c[1]) for c in calls], ctx
                 )
-                for (call, args), res in zip(calls, results):
+                for (call, args), payload in zip(calls, payloads):
                     name = call["function"]["name"]
                     tools_called.append(name)
-                    if hasattr(res, "as_dict"):
-                        payload, ok, duration, error = res.as_dict(), res.ok, res.duration_ms, res.error
-                    else:
-                        payload, ok, duration, error = {"error": str(res)}, False, 0, str(res)
+                    ok = bool(payload.get("ok"))
+                    duration = payload.get("duration_ms", 0)
+                    error = payload.get("error")
                     await _record_task(
                         db, ctx.job_id, step, name, args, payload,
                         "ok" if ok else "error", duration, error,
@@ -316,18 +339,18 @@ async def run_agent(
                     "type": "step", "step": steps + 1,
                     "message": f"Completando cobertura: {', '.join(missing)}",
                 })
-                results = await asyncio.gather(
-                    *[
-                        _run_tool(name, _fallback_args(name, ctx, query, candidates, analysis_text), ctx, steps + 1)
-                        for name in missing
-                    ],
-                    return_exceptions=True,
-                )
-                for name, res in zip(missing, results):
-                    if isinstance(res, BaseException):
-                        status, payload = "error", {"error": type(res).__name__}
-                    else:
-                        status, payload = res
+                fallback_calls = [
+                    (name, _fallback_args(name, ctx, query, candidates, analysis_text))
+                    for name in missing
+                ]
+                payloads = await _execute_tools(fallback_calls, ctx)
+                for name, payload in zip(missing, payloads):
+                    status = "ok" if payload.get("ok") else "error"
+                    await _record_task(
+                        db, ctx.job_id, steps + 1, name,
+                        _fallback_args(name, ctx, query, candidates, analysis_text),
+                        payload, status, payload.get("duration_ms", 0), payload.get("error"),
+                    )
                     tools_called.append(name)
                     trace.append({
                         "type": "tool", "step": steps + 1, "tool": name,
