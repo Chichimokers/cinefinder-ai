@@ -30,6 +30,7 @@ PRODUCTION_SECRETS = [
     "TELEGRAM_PHONE",
     "TELEGRAM_OWNER_ID",
     "TELEGRAM_SESSION",
+    "TELEGRAM_CATALOG_CHANNEL_ID",
     "API_ACCESS_TOKEN",
     "SESSION_SECRET",
     "JOB_ENCRYPTION_KEY",
@@ -48,6 +49,7 @@ PRODUCTION_SETTINGS = [
 FORBIDDEN = {"RENDER_API_KEY"}
 
 
+@render_client.resilient()
 async def get_owner_id() -> str | None:
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
@@ -65,11 +67,15 @@ async def get_owner_id() -> str | None:
     return owner.get("owner", owner).get("id")
 
 
+@render_client.resilient()
 async def create_service(repo_url: str) -> dict | None:
     owner_id = await get_owner_id()
     if not owner_id:
         print("No se pudo obtener el ownerId de Render.")
         return None
+    clean_repo = repo_url.strip()
+    if clean_repo.endswith(".git"):
+        clean_repo = clean_repo[:-4]
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
             "https://api.render.com/v1/services",
@@ -82,13 +88,28 @@ async def create_service(repo_url: str) -> dict | None:
                 "type": "web_service",
                 "name": "cinefinder-api",
                 "ownerId": owner_id,
-                "repo": repo_url,
-                "autoDeploy": True,
+                "repo": clean_repo,
+                "autoDeployTrigger": "commit",
                 "envVars": [],
+                "serviceDetails": {
+                    "runtime": "python",
+                    "plan": "free",
+                    "region": "oregon",
+                    "healthCheckPath": "/api/v1/health",
+                    "envSpecificDetails": {
+                        "buildCommand": "pip install -r requirements.txt",
+                        "startCommand": "uvicorn app.main:app --host 0.0.0.0 --port $PORT",
+                    },
+                },
             },
         )
     if resp.status_code not in (200, 201):
-        print(f"No se pudo crear el servicio (HTTP {resp.status_code}). "
+        message = ""
+        try:
+            message = str(resp.json().get("message", ""))[:200]
+        except Exception:  # noqa: BLE001
+            pass
+        print(f"No se pudo crear el servicio (HTTP {resp.status_code}). {message} "
               "Créalo desde render.yaml en el dashboard y vuelve a ejecutar.")
         return None
     data = resp.json()

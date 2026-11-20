@@ -13,10 +13,26 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 from app.config import settings
 
 BASE = "https://api.render.com/v1"
+
+TRANSIENT_ERRORS = (
+    httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout,
+    httpx.RemoteProtocolError,
+)
+
+
+def resilient():
+    """Reintentos ante fallos DNS/red transitorios del entorno."""
+    return retry(
+        stop=stop_after_attempt(6),
+        wait=wait_fixed(2),
+        retry=retry_if_exception_type(TRANSIENT_ERRORS),
+        reraise=True,
+    )
 
 
 def _headers() -> dict[str, str]:
@@ -29,6 +45,7 @@ def _headers() -> dict[str, str]:
     }
 
 
+@resilient()
 async def find_service(name: str = "cinefinder-api") -> dict | None:
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(f"{BASE}/services", params={"name": name}, headers=_headers())
@@ -42,6 +59,7 @@ async def find_service(name: str = "cinefinder-api") -> dict | None:
     return entry.get("service", entry)
 
 
+@resilient()
 async def list_env_vars(service_id: str) -> dict[str, Any]:
     """Devuelve {clave: {'value': str, 'id': ...}} SIN imprimir valores."""
     async with httpx.AsyncClient(timeout=30) as client:
@@ -58,6 +76,7 @@ async def list_env_vars(service_id: str) -> dict[str, Any]:
     return result
 
 
+@resilient()
 async def set_env_var(service_id: str, key: str, value: str) -> bool:
     """Actualiza UNA variable, preservando el resto."""
     async with httpx.AsyncClient(timeout=30) as client:
@@ -69,6 +88,7 @@ async def set_env_var(service_id: str, key: str, value: str) -> bool:
     return resp.status_code in (200, 201)
 
 
+@resilient()
 async def verify_env_var(service_id: str, key: str) -> bool:
     """Comprueba que la variable existe y tiene valor, sin mostrarlo."""
     async with httpx.AsyncClient(timeout=30) as client:
@@ -81,6 +101,7 @@ async def verify_env_var(service_id: str, key: str) -> bool:
     return bool(env.get("value"))
 
 
+@resilient()
 async def trigger_deploy(service_id: str, clear_cache: bool = False) -> dict:
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
@@ -93,6 +114,7 @@ async def trigger_deploy(service_id: str, clear_cache: bool = False) -> dict:
         return resp.json()
 
 
+@resilient()
 async def get_deploy(service_id: str, deploy_id: str) -> dict:
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
@@ -103,6 +125,7 @@ async def get_deploy(service_id: str, deploy_id: str) -> dict:
         return resp.json()
 
 
+@resilient()
 async def get_logs(service_id: str, deploy_id: str) -> str:
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.get(
