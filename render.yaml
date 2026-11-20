@@ -1,0 +1,54 @@
+# CineFinder AI — Blueprint de Render
+# NUNCA incluir valores de secretos en este archivo.
+# Las variables con sync: false se introducen en el dashboard o mediante
+# scripts/deploy_render.py, que lee .env.local (ignorado por git).
+
+services:
+  - type: web
+    name: cinefinder-api
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: ENVIRONMENT
+        value: production
+      - key: NVIDIA_MODEL
+        value: nvidia/nemotron-3.5-super-vl-120b-a12b
+      - key: NVIDIA_BASE_URL
+        value: https://integrate.api.nvidia.com/v1
+      - key: AGENT_MAX_STEPS
+        value: "8"
+      - key: AGENT_MAX_PARALLEL_TOOLS
+        value: "4"
+      - key: AGENT_TIMEOUT_SECONDS
+        value: "120"
+      - key: AGENT_MAX_CANDIDATES
+        value: "10"
+      - key: RATE_LIMIT_PER_MINUTE
+        value: "60"
+      # Secretos: sin valores en el repositorio.
+      - key: NVIDIA_API_KEY
+        sync: false
+      - key: SUPABASE_DATABASE_URL
+        sync: false
+      - key: TELEGRAM_API_ID
+        sync: false
+      - key: TELEGRAM_API_HASH
+        sync: false
+      - key: TELEGRAM_PHONE
+        sync: false
+      - key: TELEGRAM_OWNER_ID
+        sync: false
+      - key: TELEGRAM_SESSION
+        sync: false
+      - key: API_ACCESS_TOKEN
+        sync: false
+      - key: SESSION_SECRET
+        sync: false
+      - key: JOB_ENCRYPTION_KEY
+        sync: false

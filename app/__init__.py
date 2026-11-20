@@ -1,0 +1,3 @@
+"""CineFinder AI - Autonomous Movie Research Agent."""
+
+__version__ = "1.0.0"

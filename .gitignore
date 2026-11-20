@@ -1,0 +1,57 @@
+# ============================================================
+# CineFinder AI - Archivos que NUNCA deben versionarse
+# ============================================================
+
+# Secretos locales (contienen credenciales reales)
+.env.local
+.env
+.env.*.local
+*.key
+*.pem
+*.p12
+*_session.string
+telegram_session.txt
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Pruebas / cobertura
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Alembic (solo se versionan las migraciones, no la BD)
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE / SO
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs (pueden contener datos sensibles)
+logs/
+*.log
+
+# Artefactos temporales
+tmp/
+temp/
+.cache/
