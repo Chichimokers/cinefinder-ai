@@ -64,16 +64,26 @@ def _decode_images(values: list[str]) -> list[bytes]:
     return images
 
 
+def _is_owner(requester: str | None) -> bool:
+    from app.config import settings
+
+    return bool(
+        requester and str(requester).lstrip("-").isdigit()
+        and int(requester) == settings.telegram_owner_id
+    )
+
+
 async def _process_background(
     job_id: str,
     query: str,
     images: list[bytes],
     image_urls: list[str],
     requester_id: str | None,
+    is_owner: bool = False,
 ) -> None:
     try:
         async with get_sessionmaker()() as db:
-            await run_search_job(db, job_id, query, images, image_urls, requester_id)
+            await run_search_job(db, job_id, query, images, image_urls, requester_id, is_owner)
     except Exception as exc:  # noqa: BLE001
         logger.warning("background_job_failed", extra={"error": type(exc).__name__})
         async with get_sessionmaker()() as db:
@@ -107,6 +117,7 @@ async def search_json(
     if not payload.query and not images and not payload.image_urls:
         raise HTTPException(status_code=400, detail="Se requiere texto o al menos una imagen")
     requester = request.headers.get("X-Requester-ID")
+    owner = _is_owner(requester)
     async with get_sessionmaker()() as db:
         job = await create_job(
             db, query=payload.query, requester_id=requester,
@@ -116,7 +127,7 @@ async def search_json(
     job_id = job.id
     if payload.async_mode:
         background_tasks.add_task(
-            _process_background, job_id, payload.query, images, payload.image_urls, requester
+            _process_background, job_id, payload.query, images, payload.image_urls, requester, owner
         )
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
@@ -124,13 +135,13 @@ async def search_json(
                 job_id=job_id, status="queued", status_url=f"/api/v1/jobs/{job_id}"
             ).model_dump(),
         )
-    result = await _process_and_return(job_id, payload.query, images, payload.image_urls, requester)
+    result = await _process_and_return(job_id, payload.query, images, payload.image_urls, requester, owner)
     return JSONResponse(status_code=status.HTTP_200_OK, content={"job_id": job_id, **result})
 
 
-async def _process_and_return(job_id, query, images, image_urls, requester) -> dict:
+async def _process_and_return(job_id, query, images, image_urls, requester, is_owner=False) -> dict:
     async with get_sessionmaker()() as db:
-        return await run_search_job(db, job_id, query, images, image_urls, requester)
+        return await run_search_job(db, job_id, query, images, image_urls, requester, is_owner)
 
 
 @router.post("/search/multipart")
@@ -154,15 +165,16 @@ async def search_multipart(
         await db.commit()
     job_id = job.id
     requester = request.headers.get("X-Requester-ID")
+    owner = _is_owner(requester)
     if async_mode:
-        background_tasks.add_task(_process_background, job_id, query, decoded, [], requester)
+        background_tasks.add_task(_process_background, job_id, query, decoded, [], requester, owner)
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
             content=SearchAccepted(
                 job_id=job_id, status="queued", status_url=f"/api/v1/jobs/{job_id}"
             ).model_dump(),
         )
-    result = await _process_and_return(job_id, query, decoded, [], requester)
+    result = await _process_and_return(job_id, query, decoded, [], requester, owner)
     return JSONResponse(status_code=status.HTTP_200_OK, content={"job_id": job_id, **result})
 
 

@@ -93,7 +93,7 @@ async def search_omdb(query: str, year: int | None = None) -> dict[str, Any]:
 
 
 async def search_wikidata(query: str) -> dict[str, Any]:
-    """SPARQL contra Wikidata: películas con etiqueta coincidente."""
+    """Wikidata: primero SPARQL; si falla (403/timeout), API wbsearchentities."""
     sparql = """
     SELECT ?item ?itemLabel ?imdb ?year ?image WHERE {
       ?item wdt:P31 wd:Q11424.
@@ -113,20 +113,52 @@ async def search_wikidata(query: str) -> dict[str, Any]:
                 params={"query": sparql, "q": query, "format": "json"},
                 headers={"Accept": "application/sparql-results+json"},
             )
+            if resp.status_code == 200:
+                bindings = resp.json().get("results", {}).get("bindings", [])
+                results = [
+                    {
+                        "provider": "wikidata",
+                        "external_id": b.get("item", {}).get("value", "").rsplit("/", 1)[-1],
+                        "title": b.get("itemLabel", {}).get("value", ""),
+                        "original_title": b.get("itemLabel", {}).get("value", ""),
+                        "year": b.get("year", {}).get("value"),
+                        "imdb_id": b.get("imdb", {}).get("value"),
+                        "poster_url": b.get("image", {}).get("value"),
+                    }
+                    for b in bindings
+                ]
+                if results:
+                    return {"results": results, "provider": "wikidata", "reason": None}
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Fallback sin SPARQL: API pública de búsqueda de entidades.
+    try:
+        async with httpx.AsyncClient(timeout=25, headers={"User-Agent": USER_AGENT}) as client:
+            resp = await client.get(
+                "https://www.wikidata.org/w/api.php",
+                params={
+                    "action": "wbsearchentities",
+                    "search": query,
+                    "language": "es",
+                    "uselang": "es",
+                    "format": "json",
+                    "limit": 10,
+                },
+            )
             if resp.status_code != 200:
                 return _empty(f"Wikidata HTTP {resp.status_code}")
-            bindings = resp.json().get("results", {}).get("bindings", [])
+            items = resp.json().get("search", [])
         results = [
             {
                 "provider": "wikidata",
-                "external_id": b.get("item", {}).get("value", "").rsplit("/", 1)[-1],
-                "title": b.get("itemLabel", {}).get("value", ""),
-                "original_title": b.get("itemLabel", {}).get("value", ""),
-                "year": b.get("year", {}).get("value"),
-                "imdb_id": b.get("imdb", {}).get("value"),
-                "poster_url": b.get("image", {}).get("value"),
+                "external_id": item.get("id"),
+                "title": item.get("label"),
+                "original_title": item.get("label"),
+                "year": None,
+                "description": item.get("description"),
             }
-            for b in bindings
+            for item in items
         ]
         return {"results": results, "provider": "wikidata", "reason": None}
     except Exception as exc:  # noqa: BLE001

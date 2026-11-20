@@ -120,6 +120,12 @@ py -3.12 scripts\export_session.py
 
 Durante `!busca` el bot muestra en vivo su razonamiento, cada herramienta ejecutada y un resumen de resultados, y finalmente una respuesta profesional con confianza, fuentes, alternativas y estado de verificación. También puedes autorizar usuarios con `py -3.12 scripts\authorize_user.py <ID> --username nombre`.
 
+#### Búsqueda global en Telegram (solo propietario)
+
+Cuando el propietario lo pide —o hay poca evidencia en el resto de fuentes— el agente ejecuta `search_telegram_all_channels`: recorre **todos los chats y canales accesibles al userbot**, busca el texto y devuelve coincidencias con chat, mensaje, fecha y fragmento. Es una búsqueda **bajo demanda**, sin indexación persistente ni redistribución de contenido de terceros, con límites estrictos (120 diálogos, 20 mensajes por diálogo, 100 resultados). Para forzarla, incluye en la petición algo como: «busca también en todos mis canales de Telegram».
+
+Por API, envía la cabecera `X-Requester-ID` con tu `TELEGRAM_OWNER_ID` para habilitar las herramientas de propietario.
+
 Solo responde al propietario (`TELEGRAM_OWNER_ID`) y a usuarios autorizados. Deduplica eventos y agrupa álbumes por `grouped_id`.
 
 ### Canal privado de índices

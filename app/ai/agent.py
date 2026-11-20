@@ -44,6 +44,8 @@ COBERTURA OBLIGATORIA (usa todas las que apliquen):
 - search_tmdb, search_omdb, search_wikidata, search_web, search_youtube,
   search_internet_archive y search_movie_images según estén configuradas.
 - search_telegram_authorized para buscar en fuentes de Telegram autorizadas.
+- search_telegram_all_channels (solo propietario) para rastrear TODOS los chats y
+  canales accesibles al userbot cuando el usuario lo pida o haya poca evidencia.
 - verify_movie_identity, compare_movie_candidates, calculate_confidence, verify_source.
 - Guarda solo con confianza suficiente (save_movie) y publica en el índice.
 
@@ -182,6 +184,7 @@ def _fallback_args(name: str, ctx: ToolContext, query: str, candidates: list[dic
         "search_youtube": {**common, "max_results": 5},
         "search_internet_archive": {**common, "max_results": 5},
         "search_telegram_authorized": common,
+        "search_telegram_all_channels": common,
         "verify_movie_identity": with_year,
         "calculate_confidence": {
             "title": title,
@@ -198,6 +201,7 @@ DB_TOOLS = {
     "search_catalog", "check_duplicate_movie", "save_movie", "update_movie",
     "get_movie_details", "get_movie_sources", "find_authorized_media",
     "check_distribution_rights", "download_authorized_media", "search_telegram_authorized",
+    "search_telegram_all_channels",
 }
 
 
@@ -330,6 +334,7 @@ async def run_agent(
                 "search_tmdb",
                 "search_wikidata",
                 "search_telegram_authorized",
+                "search_telegram_all_channels" if ctx.is_owner else None,
                 "verify_movie_identity",
                 "calculate_confidence",
             ]
