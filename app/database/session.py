@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -20,6 +21,25 @@ logger = get_logger(__name__)
 
 _engine: AsyncEngine | None = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None
+_connectivity_ok = False
+
+
+async def ensure_connectivity() -> None:
+    """Reintenta la primera conexión ante fallos DNS transitorios del entorno."""
+    global _connectivity_ok
+    if _connectivity_ok:
+        return
+    last_error: Exception | None = None
+    for attempt in range(6):
+        try:
+            async with get_engine().connect() as conn:
+                await conn.execute(text("SELECT 1"))
+            _connectivity_ok = True
+            return
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            await asyncio.sleep(1.5)
+    raise RuntimeError(f"No se pudo conectar a PostgreSQL: {type(last_error).__name__}")
 
 
 def get_engine() -> AsyncEngine:
@@ -51,6 +71,7 @@ def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    await ensure_connectivity()
     session = get_sessionmaker()()
     try:
         yield session
@@ -60,6 +81,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 @asynccontextmanager
 async def db_session() -> AsyncGenerator[AsyncSession, None]:
+    await ensure_connectivity()
     session = get_sessionmaker()()
     try:
         yield session
@@ -74,6 +96,7 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
 async def check_database() -> dict:
     """Comprueba conexión y devuelve información segura (sin credenciales)."""
     try:
+        await ensure_connectivity()
         engine = get_engine()
         async with engine.connect() as conn:
             result = await conn.execute(text("SELECT 1 AS ok, version() AS version"))
@@ -96,8 +119,9 @@ async def init_db() -> None:
 
 
 async def dispose_engine() -> None:
-    global _engine, _sessionmaker
+    global _engine, _sessionmaker, _connectivity_ok
     if _engine is not None:
         await _engine.dispose()
     _engine = None
     _sessionmaker = None
+    _connectivity_ok = False
