@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -20,6 +23,16 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI):
     configure_logging()
     logger.info("cinefinder_starting", extra={"config": settings.public_dict()})
+
+    # Migraciones automáticas controladas (no comandos generados por el modelo).
+    try:
+        from alembic import command
+        from alembic.config import Config
+
+        command.upgrade(Config(str(ROOT / "alembic.ini")), "head")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("alembic_upgrade_failed", extra={"error": type(exc).__name__})
+
     try:
         from app.database.session import check_database, dispose_engine
 

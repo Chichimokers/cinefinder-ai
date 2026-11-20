@@ -76,5 +76,5 @@ def register() -> None:
             "required": ["query"],
         },
         handler=search_telegram_authorized,
-        permission="admin",
+        permission="user",
     ))

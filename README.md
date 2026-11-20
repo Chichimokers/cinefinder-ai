@@ -113,8 +113,12 @@ py -3.12 scripts\export_session.py
 | `!info CF-000001` | Ficha de una película |
 | `!stats` | Estadísticas del catálogo |
 | `!ultimas` | Últimas incorporaciones |
+| `!autorizar <ID> [usuario]` | Autoriza a otro usuario (solo propietario) |
+| `!desautorizar <ID>` | Revoca la autorización (solo propietario) |
 | `!ayuda` | Ayuda |
 | `!estado` | Estado de servicios |
+
+Durante `!busca` el bot muestra en vivo su razonamiento, cada herramienta ejecutada y un resumen de resultados, y finalmente una respuesta profesional con confianza, fuentes, alternativas y estado de verificación. También puedes autorizar usuarios con `py -3.12 scripts\authorize_user.py <ID> --username nombre`.
 
 Solo responde al propietario (`TELEGRAM_OWNER_ID`) y a usuarios autorizados. Deduplica eventos y agrupa álbumes por `grouped_id`.
 
@@ -142,7 +146,8 @@ Authorization: Bearer <API_ACCESS_TOKEN>
 | GET | `/api/v1/ready` | Comprobación de base de datos |
 | POST | `/api/v1/search` | JSON o `async: true` → 202 con `job_id` |
 | POST | `/api/v1/search/multipart` | Envío de imágenes |
-| GET | `/api/v1/jobs/{job_id}` | Estado del trabajo |
+| GET | `/api/v1/jobs/{job_id}` | Estado del trabajo + resultado completo (`result.trace`, `result.formatted_answer`) |
+| GET | `/api/v1/jobs/{job_id}/events` | SSE en vivo: pensamiento y herramientas del agente |
 | GET | `/api/v1/movies` | Listado (`q`, `skip`, `limit`) |
 | GET | `/api/v1/movies/{movie_id}` | Ficha por ID o código CF |
 | GET | `/api/v1/stats` | Métricas |

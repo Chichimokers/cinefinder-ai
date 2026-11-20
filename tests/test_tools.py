@@ -23,7 +23,7 @@ def test_admin_tools_hidden_for_normal_users():
     schemas = registry.schemas(is_owner=False)
     names = {s["function"]["name"] for s in schemas}
     assert "update_movie" not in names
-    assert "search_telegram_authorized" not in names
+    assert "search_telegram_authorized" in names  # búsqueda restringida a chats autorizados
     assert "analyze_image" in names
 
 

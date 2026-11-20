@@ -94,7 +94,33 @@ async def answer(message: Message, text: str) -> None:
 
 
 async def handle_busca(message: Message, query: str, images: list[bytes]) -> None:
-    await answer(message, "🔍 Iniciando investigación…")
+    await answer(message, "🔍 Iniciando investigación con todas las fuentes disponibles…")
+    client = get_telegram_client()
+
+    async def progress(event: dict) -> None:
+        """Muestra en vivo el razonamiento y las herramientas del agente."""
+        if client is None or not client.is_connected():
+            return
+        kind = event.get("type")
+        step = event.get("step")
+        text = ""
+        if kind == "step":
+            text = f"🧠 *Paso {step}* — {event.get('message', '')}"
+        elif kind == "thinking":
+            thought = (event.get("message") or "").strip()[:420]
+            if thought:
+                text = f"💭 *Razonamiento:* {thought}"
+        elif kind == "tool_result":
+            data = event.get("data") or {}
+            tool = data.get("tool", "herramienta")
+            state = "OK" if data.get("ok") else "sin datos"
+            text = f"🔧 *{tool}* → {state}\n{(data.get('summary') or '')[:260]}"
+        if text:
+            try:
+                await client.send_message(message.chat_id, text)
+            except Exception:  # noqa: BLE001
+                pass
+
     async with get_sessionmaker()() as db:
         job = await create_job(
             db,
@@ -108,14 +134,9 @@ async def handle_busca(message: Message, query: str, images: list[bytes]) -> Non
             db, job.id, query, images,
             requester_id=str(message.chat_id),
             is_owner=message.sender_id == settings.telegram_owner_id,
+            progress=progress,
         )
-    movie = result.get("movie")
-    if movie:
-        text = (f"✅ {movie['code']} — {movie['title']} ({movie.get('year') or '?'})\n"
-                f"Confianza: {result['confidence']:.2f}")
-    else:
-        text = "⚠️ No pude identificar la película con confianza. Revisión manual."
-    await answer(message, text)
+    await answer(message, result.get("formatted_answer") or "⚠️ Sin respuesta del agente.")
 
 
 async def handle_info(message: Message, code: str) -> None:

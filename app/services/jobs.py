@@ -58,6 +58,7 @@ async def job_to_dict(job: SearchJob) -> dict:
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
         "result_movie_id": job.result_movie_id,
         "result_confidence": job.result_confidence,
+        "result": job.result_json,
         "steps_done": job.steps_done,
         "error": job.error,
     }

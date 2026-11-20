@@ -134,6 +134,7 @@ class SearchJob(TimestampMixin, Base):
     encrypted_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
     result_movie_id: Mapped[int | None] = mapped_column(ForeignKey("movies.id"), nullable=True)
     result_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    result_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     steps_done: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

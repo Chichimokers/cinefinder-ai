@@ -7,7 +7,7 @@ import binascii
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
@@ -173,6 +173,32 @@ async def get_job_status(job_id: str, _: str = Depends(require_auth)) -> dict:
     if job is None:
         raise HTTPException(status_code=404, detail="Job no encontrado")
     return await job_to_dict(job)
+
+
+@router.get("/jobs/{job_id}/events")
+async def job_events(job_id: str, _: str = Depends(require_auth)) -> StreamingResponse:
+    """Streaming de eventos: pensamiento y herramientas en vivo (SSE)."""
+    import asyncio
+
+    from app.services.events import sse, subscribe, unsubscribe
+
+    queue = subscribe(job_id)
+
+    async def generator():
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=30)
+                except TimeoutError:
+                    yield sse({"type": "heartbeat", "message": "en curso"})
+                    continue
+                yield sse(event)
+                if event.get("type") == "final":
+                    break
+        finally:
+            unsubscribe(job_id, queue)
+
+    return StreamingResponse(generator(), media_type="text/event-stream")
 
 
 @router.get("/movies", response_model=list[MovieOut])

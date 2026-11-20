@@ -67,6 +67,51 @@ def build_catalog_caption(movie: Any, sources: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def format_professional_answer(
+    parsed: dict, movie: dict | None, confidence: float, publication: dict | None, agent: AgentResult
+) -> str:
+    """Respuesta final profesional, legible en Telegram y en la API."""
+    if movie:
+        header = f"🎬 *{movie.get('code', '')} — {movie.get('title', '')}*"
+        if movie.get("year"):
+            header += f" ({movie['year']})"
+        lines = [header]
+    else:
+        lines = ["🔎 *Resultado de la investigación*"]
+
+    lines.append(f"📊 Confianza: *{confidence:.0%}*")
+    status = parsed.get("verification_status") or ("verificado" if movie else "sin verificar")
+    lines.append(f"✅ Estado: {status}")
+
+    reasoning = parsed.get("reasoning") or parsed.get("raw")
+    if reasoning:
+        lines.append(f"\n🧠 *Análisis*\n{str(reasoning)[:900]}")
+
+    sources = parsed.get("sources") or []
+    if sources:
+        lines.append("\n🔗 *Fuentes verificables*")
+        for source in sources[:6]:
+            provider = source.get("provider", "fuente")
+            external = source.get("external_id") or ""
+            url = source.get("url")
+            label = f"• {provider}" + (f" · {external}" if external else "")
+            lines.append(f"{label}: {url}" if url else label)
+
+    alternatives = parsed.get("alternatives") or []
+    if alternatives:
+        lines.append("\n🔄 *Alternativas consideradas*")
+        for alt in alternatives[:4]:
+            lines.append(f"• {alt.get('title')}" + (f" ({alt.get('year')})" if alt.get("year") else ""))
+
+    lines.append(f"\n🛠️ Herramientas: {', '.join(agent.tools_called[:12])}")
+    lines.append(f"🧩 Pasos: {agent.steps} | Tokens: {agent.usage.get('total_tokens', 0)}")
+    if publication:
+        lines.append(f"📚 Publicado en el índice privado (mensaje {publication.get('message_id')}).")
+    if parsed.get("need_review"):
+        lines.append("\n⚠️ Se recomienda revisión manual antes de darla por definitiva.")
+    return "\n".join(lines)
+
+
 async def run_search_job(
     db: AsyncSession,
     job_id: str,
@@ -75,6 +120,7 @@ async def run_search_job(
     image_urls: list[str] | None = None,
     requester_id: str | None = None,
     is_owner: bool = False,
+    progress=None,
 ) -> dict:
     """Ejecuta un job completo: agente → verificación → catálogo → publicación."""
     await set_status(db, job_id, "running")
@@ -89,7 +135,7 @@ async def run_search_job(
     )
 
     agent: AgentResult = await run_agent(
-        db, ctx, query=query, images=images_bytes, image_urls=image_urls or []
+        db, ctx, query=query, images=images_bytes, image_urls=image_urls or [], progress=progress
     )
     parsed = parse_agent_answer(agent.answer)
     movie_data = parsed.get("movie") or {}
@@ -167,15 +213,8 @@ async def run_search_job(
         db, query, [hash_image(img) for img in images_bytes],
         len(agent.candidates), requester_id, job_id,
     )
-    await set_status(
-        db, job_id, "completed",
-        result_movie_id=saved.get("id") if saved else None,
-        result_confidence=confidence,
-        steps_done=agent.steps,
-    )
-    await db.commit()
-
-    return {
+    formatted = format_professional_answer(parsed, saved, confidence, publication, agent)
+    result = {
         "job_id": job_id,
         "status": "completed",
         "movie": saved,
@@ -185,5 +224,16 @@ async def run_search_job(
         "publication": publication,
         "agent_status": agent.status,
         "answer": parsed,
+        "formatted_answer": formatted,
+        "trace": agent.trace,
         "usage": agent.usage,
     }
+    await set_status(
+        db, job_id, "completed",
+        result_movie_id=saved.get("id") if saved else None,
+        result_confidence=confidence,
+        steps_done=agent.steps,
+        result_json=result,
+    )
+    await db.commit()
+    return result
