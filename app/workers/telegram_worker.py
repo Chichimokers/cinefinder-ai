@@ -23,7 +23,7 @@ from app.utils.security import hash_image
 
 logger = get_logger(__name__)
 
-COMMANDS = ("!busca", "!info", "!stats", "!ultimas", "!ayuda", "!estado")
+COMMANDS = ("!busca", "!info", "!stats", "!ultimas", "!ayuda", "!estado", "!autorizar", "!desautorizar")
 ALBUM_DEBOUNCE_SECONDS = 1.5
 
 HELP = """🤖 CineFinder AI — Comandos
@@ -32,6 +32,8 @@ HELP = """🤖 CineFinder AI — Comandos
 !stats — estadísticas del catálogo
 !ultimas — últimas incorporationes
 !estado — estado del sistema
+!autorizar <ID> [usuario] — autoriza a otro usuario (solo propietario)
+!desautorizar <ID> — revoca la autorización (solo propietario)
 !ayuda — este mensaje
 """
 
@@ -165,6 +167,33 @@ async def handle_estado(message: Message) -> None:
     )
 
 
+async def set_user_authorization(message: Message, argument: str, authorized: bool) -> None:
+    if message.sender_id != settings.telegram_owner_id:
+        await answer(message, "⛔ Solo el propietario puede autorizar usuarios.")
+        return
+    parts = argument.split()
+    if not parts or not parts[0].lstrip("-").isdigit():
+        await answer(message, "Uso: !autorizar <ID_numérico> [usuario]")
+        return
+    telegram_id = int(parts[0])
+    username = parts[1] if len(parts) > 1 else None
+    async with get_sessionmaker()() as db:
+        result = await db.execute(
+            select(AppUser).where(AppUser.telegram_id == telegram_id)
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            user = AppUser(telegram_id=telegram_id, username=username)
+            db.add(user)
+        if username:
+            user.username = username
+        user.is_authorized = authorized
+        user.is_owner = False
+        await db.flush()
+    action = "autorizado" if authorized else "desautorizado"
+    await answer(message, f"✅ Usuario {telegram_id} {action}.")
+
+
 async def process_group(images: list[bytes], texts: list[str], message: Message) -> None:
     query = " ".join(t for t in texts if t and not t.startswith("!")).strip()
     await handle_busca(message, query, images)
@@ -233,6 +262,10 @@ def register_handlers(client: Any) -> None:
             await answer(message, HELP)
         elif command == "!estado":
             await handle_estado(message)
+        elif command == "!autorizar":
+            await set_user_authorization(message, argument, True)
+        elif command == "!desautorizar":
+            await set_user_authorization(message, argument, False)
 
 
 async def run_telegram_worker() -> None:

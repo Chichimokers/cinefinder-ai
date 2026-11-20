@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -28,8 +29,36 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # noqa: BLE001
         logger.warning("startup_check_failed", extra={"error": type(exc).__name__})
 
-    # El userbot se conecta de forma diferida: Render Free puede no mantenerlo activo.
+    # Userbot opcional dentro del mismo proceso (ENABLE_TELEGRAM_WORKER=true).
+    telegram_task: asyncio.Task | None = None
+    if os.environ.get("ENABLE_TELEGRAM_WORKER", "").lower() in {"1", "true", "yes"}:
+        try:
+            from app.telegram.client import connect_telegram, disconnect_telegram, get_telegram_client
+            from app.workers.telegram_worker import register_handlers
+
+            ok, detail = await connect_telegram()
+            if ok:
+                client = get_telegram_client()
+                if client is not None:
+                    register_handlers(client)
+                    telegram_task = asyncio.create_task(client.run_until_disconnected())
+                    logger.info("telegram_worker_started_in_web_service")
+            else:
+                logger.warning("telegram_worker_not_started", extra={"detail": detail})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("telegram_worker_start_failed", extra={"error": type(exc).__name__})
+
     yield
+
+    if telegram_task is not None:
+        telegram_task.cancel()
+        await asyncio.gather(telegram_task, return_exceptions=True)
+        try:
+            from app.telegram.client import disconnect_telegram
+
+            await disconnect_telegram()
+        except Exception:  # noqa: BLE001
+            pass
 
     try:
         from app.database.session import dispose_engine
