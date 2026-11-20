@@ -25,11 +25,22 @@ async def lifespan(app: FastAPI):
     logger.info("cinefinder_starting", extra={"config": settings.public_dict()})
 
     # Migraciones automáticas controladas (no comandos generados por el modelo).
+    # Se ejecutan en un subproceso: Alembic usa asyncio.run internamente y no
+    # puede ejecutarse dentro del event loop de FastAPI.
     try:
-        from alembic import command
-        from alembic.config import Config
+        import subprocess
+        import sys
 
-        command.upgrade(Config(str(ROOT / "alembic.ini")), "head")
+        result = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=180,
+        )
+        if result.returncode != 0:
+            from app.utils.security import redact_message
+
+            logger.warning("alembic_upgrade_failed", extra={"detail": redact_message(result.stderr[-300:])})
+        else:
+            logger.info("alembic_upgrade_ok")
     except Exception as exc:  # noqa: BLE001
         logger.warning("alembic_upgrade_failed", extra={"error": type(exc).__name__})
 
