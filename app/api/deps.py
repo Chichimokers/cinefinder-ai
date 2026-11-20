@@ -23,8 +23,8 @@ async def require_auth(request: Request) -> str:
     return "authenticated"
 
 
-def apply_rate_limit(request: Request) -> None:
-    """Ventana deslizante en memoria por IP ( suficiente para un worker )."""
+def check_rate_limit(request: Request) -> bool:
+    """Ventana deslizante en memoria por IP. Devuelve False si excede el límite."""
     ip = request.client.host if request.client else "unknown"
     now = time.monotonic()
     bucket = _buckets[ip]
@@ -32,8 +32,15 @@ def apply_rate_limit(request: Request) -> None:
     while bucket and bucket[0] < now - window:
         bucket.popleft()
     if len(bucket) >= settings.rate_limit_per_minute:
+        return False
+    bucket.append(now)
+    return True
+
+
+def apply_rate_limit(request: Request) -> None:
+    """Versión para uso dentro de endpoints."""
+    if not check_rate_limit(request):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Límite de peticiones por minuto excedido",
         )
-    bucket.append(now)

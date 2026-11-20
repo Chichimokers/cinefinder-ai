@@ -53,6 +53,22 @@ app = FastAPI(
 app.include_router(router)
 
 
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    from app.api.deps import check_rate_limit
+
+    path = request.url.path
+    if path.startswith("/api/v1/") and path not in {
+        "/api/v1/health", "/api/v1/ready",
+    }:
+        if not check_rate_limit(request):
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Límite de peticiones por minuto excedido"},
+            )
+    return await call_next(request)
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     logger.error("unhandled_exception", extra={"error": type(exc).__name__, "path": request.url.path})

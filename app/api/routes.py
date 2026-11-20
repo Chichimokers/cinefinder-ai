@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
-from app.api.deps import apply_rate_limit, require_auth
+from app.api.deps import require_auth
 from app.database.models import AgentTask, Movie, SearchHistory, SearchJob
 from app.database.session import check_database, get_sessionmaker
 from app.services.jobs import create_job, get_job, job_to_dict, recover_stalled_jobs, set_status
@@ -103,7 +103,6 @@ async def search_json(
     request: Request,
     _: str = Depends(require_auth),
 ) -> Any:
-    apply_rate_limit(request)
     images = _decode_images(payload.images)
     if not payload.query and not images and not payload.image_urls:
         raise HTTPException(status_code=400, detail="Se requiere texto o al menos una imagen")
@@ -143,7 +142,6 @@ async def search_multipart(
     async_mode: bool = Form(True, alias="async"),
     _: str = Depends(require_auth),
 ) -> Any:
-    apply_rate_limit(request)
     decoded: list[bytes] = []
     for upload in images[:8]:
         content = await upload.read()
