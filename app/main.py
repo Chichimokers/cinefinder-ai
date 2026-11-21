@@ -71,8 +71,12 @@ async def lifespan(app: FastAPI):
 
     async def _telegram_supervisor() -> None:
         """Mantiene el worker de escucha vivo; lo reinicia si se cae."""
-        from app.telegram.client import connect_listener, disconnect_telegram, get_listener_client
+        from app.telegram.client import connect_listener, connect_telegram, disconnect_telegram, get_listener_client
         from app.workers.telegram_worker import register_handlers
+
+        # El cliente RPC también debe estar conectado para enviar mensajes/archivos.
+        rpc_ok, rpc_detail = await connect_telegram()
+        logger.info("telegram_rpc_ready", extra={"ok": rpc_ok})
 
         while not listener_stop.is_set():
             try:
