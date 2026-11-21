@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections import defaultdict
 from typing import Any
 
@@ -391,7 +392,9 @@ async def deliver_selected_media(chat_id: int, sender_id: int, job_id: str | Non
         source = source_result.scalar_one_or_none()
 
     link = _telegram_link(item["chat_id"], item["message_id"])
-    if source is None:
+    # El propietario tiene acceso absoluto a los datos de su propia cuenta.
+    allowed = source is not None or is_owner_id(sender_id)
+    if not allowed:
         await answer_safe(
             chat_id,
             "⚠️ Ese chat no está registrado como fuente autorizada para entrega automática.\n"
@@ -417,7 +420,8 @@ async def deliver_selected_media(chat_id: int, sender_id: int, job_id: str | Non
         import hashlib
 
         digest = hashlib.sha256(data).hexdigest()
-        caption = f"📦 Archivo autorizado · fuente: {source.name}\nSHA-256: {digest}"
+        source_name = source.name if source else "tu cuenta (propietario)"
+        caption = f"📦 Archivo autorizado · fuente: {source_name}\nSHA-256: {digest}"
         await client.send_file(chat_id, data, caption=caption)
         await answer_safe(chat_id, f"✅ Enviado. Origen: {link}")
     except Exception as exc:  # noqa: BLE001
@@ -445,10 +449,14 @@ async def start_deep_search(message: Message, query: str, images: list[bytes]) -
         search = await create_file_search(
             db,
             query=query or "imagen enviada",
-            requester_id=str(message.chat_id),
+            requester_id=str(message.sender_id or message.chat_id),
             image_features=features,
         )
-        search.scope = {"chat_id": message.chat_id, "origin": "telegram"}
+        search.scope = {
+            "chat_id": message.chat_id,
+            "user_id": message.sender_id,
+            "origin": "telegram",
+        }
         await db.commit()
         search_id = search.id
     asyncio.create_task(run_deep_search_job(search_id))
@@ -511,7 +519,9 @@ async def deliver_indexed_file(message: Message, argument: str) -> None:
         source = source_result.scalar_one_or_none()
 
     link = _telegram_link(dialog_id, message_id)
-    if source is None:
+    # El propietario puede recuperar archivos de sus propios chats sin registro extra.
+    allowed = source is not None or is_owner_id(message.sender_id)
+    if not allowed:
         await answer(
             message,
             "⚠️ Ese chat no está autorizado para entrega automática. "
@@ -618,6 +628,25 @@ def register_handlers(client: Any) -> None:
             # Solo se responde en chats privados; en grupos se ignora para no molestar.
             if message.chat_id == sender_id:
                 await answer(message, UNAUTHORIZED_MESSAGE)
+            return
+
+        # Responder solo con un número selecciona un archivo de la última búsqueda.
+        if re.fullmatch(r"\d{1,2}", text.strip()):
+            selection = text.strip()
+            _, deep_results = await _get_pending_files(message.chat_id, sender_id)
+            if deep_results:
+                await deliver_indexed_file(message, selection)
+                return
+            async with get_sessionmaker()() as db:
+                key = await _pending_key(message.chat_id, sender_id)
+                res = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
+                pending = res.scalar_one_or_none()
+            if pending and pending.value:
+                await deliver_selected_media(
+                    message.chat_id, sender_id or 0, None, int(selection) - 1
+                )
+                return
+            await answer(message, "ℹ️ No hay una selección pendiente. Usa !archivos o !busca primero.")
             return
 
         if command not in COMMANDS:

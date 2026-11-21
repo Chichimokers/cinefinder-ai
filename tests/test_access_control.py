@@ -36,6 +36,23 @@ def test_username_validation():
     assert result["ok"] is False
 
 
+def test_pending_key_is_per_user():
+    """Los resultados no deben cruzarse entre usuarios (chat distinto, mismo ID)."""
+    import asyncio
+
+    from app.workers.telegram_worker import _pending_key
+
+    async def run():
+        a = await _pending_key(100, 555)
+        b = await _pending_key(999, 555)  # mismo usuario, otro chat
+        c = await _pending_key(100, 777)  # otro usuario, mismo chat
+        return a, b, c
+
+    a, b, c = asyncio.run(run())
+    assert a == b, "mismo usuario debe ver sus resultados desde cualquier chat"
+    assert a != c, "usuarios distintos no deben compartir resultados"
+
+
 def test_numeric_id_without_telegram_is_not_trusted():
     """Un ID escrito a mano no debe autorizarse sin verificación MTProto."""
     from app.services.access_control import resolve_user
