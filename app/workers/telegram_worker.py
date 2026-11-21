@@ -158,7 +158,10 @@ async def download_images(messages: list[Message]) -> list[bytes]:
 async def answer(message: Message, text: str) -> None:
     client = get_telegram_client()
     if client and client.is_connected():
-        await client.send_message(message.chat_id, text, reply_to=message.id)
+        try:
+            await client.send_message(message.chat_id, text, reply_to=message.id)
+        except Exception:  # noqa: BLE001  (chat sin permiso de escritura, etc.)
+            pass
 
 
 def _truncate(text: str, limit: int = 3000) -> str:
@@ -183,8 +186,11 @@ async def handle_busca(message: Message, query: str, images: list[bytes]) -> Non
         return
 
     header = [f"🔎 *Investigando*{' · ' + _truncate(query, 90) if query else ''}", ""]
-    status_msg = await client.send_message(message.chat_id, "\n".join(header))
-    status_id = int(status_msg.id)
+    try:
+        status_msg = await client.send_message(message.chat_id, "\n".join(header))
+        status_id = int(status_msg.id)
+    except Exception:  # noqa: BLE001
+        return
 
     state: dict[str, list[str]] = {
         "pasos": [],
@@ -421,7 +427,10 @@ async def deliver_selected_media(chat_id: int, sender_id: int, job_id: str | Non
 async def answer_safe(chat_id: int, text: str) -> None:
     client = get_telegram_client()
     if client and client.is_connected():
-        await client.send_message(chat_id, text)
+        try:
+            await client.send_message(chat_id, text)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 async def start_deep_search(message: Message, query: str, images: list[bytes]) -> None:
