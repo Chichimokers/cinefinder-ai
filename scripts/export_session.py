@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Valida la sesión local y la exporta al secreto TELEGRAM_SESSION de Render.
+"""Valida la sesión local y la exporta a Render.
+
+Exporta TELEGRAM_SESSION, TELEGRAM_PHONE y TELEGRAM_OWNER_ID para que la
+cuenta vinculada (número +5358126024 por defecto) quede coherente en producción.
 
 Uso: py -3.12 scripts/export_session.py
 """
@@ -60,15 +63,24 @@ async def main() -> int:
     existing = await render_client.list_env_vars(service_id)
     print(f"Variables existentes preservadas: {len(existing)} (valores no mostrados).")
 
-    ok = await render_client.set_env_var(service_id, "TELEGRAM_SESSION", session_string)
-    if not ok:
-        print("No se pudo actualizar TELEGRAM_SESSION en Render.")
-        return 1
-    verified = await render_client.verify_env_var(service_id, "TELEGRAM_SESSION")
-    print(f"TELEGRAM_SESSION exportada y verificada en Render: {verified}")
+    local = read_env()
+    values = {
+        "TELEGRAM_SESSION": session_string,
+        "TELEGRAM_PHONE": local.get("TELEGRAM_PHONE", settings.telegram_phone),
+        "TELEGRAM_OWNER_ID": local.get("TELEGRAM_OWNER_ID", str(settings.telegram_owner_id)),
+    }
+    all_ok = True
+    for key, value in values.items():
+        if not value:
+            continue
+        ok = await render_client.set_env_var(service_id, key, str(value))
+        verified = await render_client.verify_env_var(service_id, key)
+        print(f"{key}: exportada={'sí' if ok else 'NO'} | verificada={'sí' if verified else 'NO'}")
+        all_ok = all_ok and ok and verified
+
     print("IMPORTANTE: desconecta la sesión local antes de iniciar el worker en Render;")
     print("Telegram no permite la misma sesión conectada dos veces simultáneamente.")
-    return 0 if verified else 1
+    return 0 if all_ok else 1
 
 
 if __name__ == "__main__":

@@ -65,12 +65,23 @@ async def main() -> int:
         if me is None:
             print("No se pudo obtener la identidad de la cuenta.")
             return 1
-        if settings.telegram_owner_id and me.id != settings.telegram_owner_id:
-            print("La cuenta autenticada no coincide con TELEGRAM_OWNER_ID.")
-            return 1
+
+        # Al usar un número distinto, el Telegram User ID cambia. Si el ID
+        # autenticado no coincide con el configurado, se ofrece actualizarlo.
+        owner_id = settings.telegram_owner_id
+        if owner_id and me.id != owner_id:
+            print(f"La cuenta autenticada tiene ID {me.id}, distinto de TELEGRAM_OWNER_ID={owner_id}.")
+            answer = input("¿Establecer este ID como propietario? [s/n]: ").strip().lower()
+            if answer in ("s", "si", "sí", "y", "yes"):
+                owner_id = me.id
+            else:
+                print("Autenticación cancelada: el ID no coincide con el propietario.")
+                return 1
 
         string_session = client.session.save()
         data = {"TELEGRAM_SESSION": string_session}
+        if owner_id:
+            data["TELEGRAM_OWNER_ID"] = str(owner_id)
         write_env(data)
         await client.disconnect()
 
@@ -82,6 +93,7 @@ async def main() -> int:
         valid = await check.is_user_authorized()
         await check.disconnect()
         print(f"Sesión generada y almacenada de forma segura. Válida: {valid}")
+        print(f"Cuenta autenticada: ID {me.id} (número {phone})")
         return 0 if valid else 1
     except Exception as exc:  # noqa: BLE001
         print(f"Autenticación fallida: {type(exc).__name__}. Revisa teléfono/OTP/2FA.")

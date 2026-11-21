@@ -103,6 +103,8 @@ py -3.12 scripts\authenticate_telegram.py
 py -3.12 scripts\export_session.py
 ```
 
+El número configurado es `+5358126024` (`TELEGRAM_PHONE`). Si al autenticar ese número el Telegram User ID difiere del `TELEGRAM_OWNER_ID` anterior, el asistente ofrece actualizar el propietario automáticamente. `export_session.py` sube a Render `TELEGRAM_SESSION`, `TELEGRAM_PHONE` y `TELEGRAM_OWNER_ID`, preservando el resto de variables.
+
 `export_session.py` valida la sesión y la escribe como secreto `TELEGRAM_SESSION` en Render, preservando las variables existentes. **No mantengas la misma sesión conectada localmente y en Render a la vez.**
 
 ### Comandos
