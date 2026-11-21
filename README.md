@@ -110,6 +110,7 @@ py -3.12 scripts\export_session.py
 | Comando | Función |
 |---|---|
 | `!busca [texto]` | Investiga texto, fotos, capturas o álbumes |
+| *(enviar una foto o álbum sin comando)* | Inicia la investigación automáticamente |
 | `!info CF-000001` | Ficha de una película |
 | `!stats` | Estadísticas del catálogo |
 | `!ultimas` | Últimas incorporaciones |
@@ -121,7 +122,9 @@ py -3.12 scripts\export_session.py
 
 Durante `!busca` el bot crea **un único mensaje** y lo va actualizando en vivo con el progreso real: pasos del agente, razonamiento, etapas del escaneo y fuentes consultadas. Al terminar, ese mismo mensaje se sustituye por el informe final profesional (confianza, fuentes, alternativas y estado). No se envía un mensaje por herramienta.
 
-Si se encuentran archivos, la lista numerada y los botones aparecen en ese mismo mensaje. Responde `!enviar <n>` (o `!enviararchivo <n>` en búsquedas profundas) para recibir exactamente el archivo elegido; la confirmación incluye el enlace al mensaje original. También puedes autorizar usuarios con `py -3.12 scripts\authorize_user.py <ID> --username nombre`.
+Si se encuentran archivos, la lista numerada y los botones aparecen en ese mismo mensaje. Puedes responder **solamente con el número** (`1`, `2`…) o usar `!enviar <n>` / `!enviararchivo <n>` para recibir exactamente el archivo elegido; la confirmación incluye el enlace al mensaje original.
+
+Además, **no necesitas escribir ningún comando para buscar una imagen**: envía una foto o un álbum directamente y el bot inicia la investigación igual que con `!busca`. El texto del pie de la foto se usa como descripción adicional. También puedes autorizar usuarios con `py -3.12 scripts\authorize_user.py <ID> --username nombre`.
 
 #### Búsqueda global en Telegram (solo propietario)
 

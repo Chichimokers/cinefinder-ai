@@ -599,6 +599,26 @@ def register_handlers(client: Any) -> None:
         text = " ".join((m.text or "") for m in messages if not (m.text or "").startswith("!"))
         await start_deep_search(first, text.strip(), images)
 
+    async def _flush_auto_album(group_id: str) -> None:
+        """Álbum enviado sin comando: se investiga automáticamente con !busca."""
+        await asyncio.sleep(ALBUM_DEBOUNCE_SECONDS)
+        messages = albums.pop(group_id, [])
+        album_tasks.pop(group_id, None)
+        if not messages:
+            return
+        first = messages[0]
+        async with get_sessionmaker()() as db:
+            if not await register_event(db, first, []):
+                return
+            await db.commit()
+        images = await download_images(messages)
+        captions = [
+            (m.text or "").strip()
+            for m in messages
+            if (m.text or "").strip() and not (m.text or "").startswith("!")
+        ]
+        await handle_busca(first, " ".join(captions).strip(), images)
+
     @client.on(events.NewMessage())
     async def handler(event: events.NewMessage.Event) -> None:
         message = event.message
@@ -647,6 +667,43 @@ def register_handlers(client: Any) -> None:
                 )
                 return
             await answer(message, "ℹ️ No hay una selección pendiente. Usa !archivos o !busca primero.")
+            return
+
+        # Foto o álbum enviado SIN comando: se investiga automáticamente.
+        has_image = bool(getattr(message, "photo", None) or getattr(message, "media", None))
+        if has_image:
+            if message.grouped_id:
+                group_id = str(message.grouped_id)
+                albums[group_id].append(message)
+                if group_id in album_tasks:
+                    album_tasks[group_id].cancel()
+                album_tasks[group_id] = asyncio.create_task(_flush_auto_album(group_id))
+                return
+            async with get_sessionmaker()() as db:
+                if not await register_event(db, message, []):
+                    return
+                await db.commit()
+            images = await download_images([message])
+            if images:
+                caption = (message.text or "").strip()
+                await handle_busca(message, caption, images)
+                return
+
+        # Texto sin comando: si hay una selección pendiente se interpreta como
+        # descripción adicional; si no, se sugiere usar !busca.
+        if command not in COMMANDS and text.strip():
+            _, deep_results = await _get_pending_files(message.chat_id, sender_id)
+            if deep_results:
+                await answer(
+                    message,
+                    "ℹ️ Tienes una búsqueda pendiente. Responde con el número del archivo "
+                    "o usa !infoarchivo <n>.",
+                )
+            else:
+                await answer(
+                    message,
+                    "📷 Envíame una foto o un álbum y lo investigo, o usa !busca [texto] / !archivos [texto].",
+                )
             return
 
         if command not in COMMANDS:
