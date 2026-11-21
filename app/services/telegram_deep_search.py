@@ -455,9 +455,15 @@ async def create_file_search(
 
 
 async def recover_searches(db: AsyncSession) -> int:
-    """Reencola búsquedas interrumpidas por reinicios del servicio."""
+    """Reencola solo búsquedas antiguas interrumpidas por reinicios."""
+    from datetime import timedelta
+
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
     result = await db.execute(
-        select(FileSearch).where(FileSearch.status.in_(["queued", "running"]))
+        select(FileSearch).where(
+            FileSearch.status.in_(["queued", "running"]),
+            FileSearch.created_at < cutoff,
+        )
     )
     searches = result.scalars().all()
     for search in searches:

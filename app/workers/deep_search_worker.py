@@ -42,7 +42,7 @@ async def run_deep_search_job(search_id: str) -> dict | None:
         if search is None or search.status in {"completed", "cancelled"}:
             return None
         search.status = "running"
-        await db.flush()
+        await db.commit()
         try:
             output = await run_file_search(db, search)
             output["query"] = search.query
