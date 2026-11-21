@@ -90,6 +90,13 @@ async def connect_telegram() -> tuple[bool, str]:
     if ok:
         _reconnect_attempts = 0
     else:
+        # AuthKeyDuplicatedError = la misma sesión se usó desde otra IP.
+        # No es una revocación: se descarta el cliente y se reintenta con uno nuevo.
+        if "AuthKeyDuplicated" in detail:
+            logger.warning("telegram_session_conflict_retrying")
+            client.disconnect() if client.is_connected() else None
+            _client = None
+            return False, detail
         _reconnect_attempts += 1
         if _reconnect_attempts >= 3 or "revocada" in detail:
             _auth_failed = True

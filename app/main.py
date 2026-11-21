@@ -76,6 +76,12 @@ async def lifespan(app: FastAPI):
 
         while not listener_stop.is_set():
             try:
+                from app.telegram import client as tg_client
+
+                # Si la sesión se marcó como fallida, se permite un nuevo intento
+                # tras cada ciclo (Telegram puede reautorizar la misma sesión).
+                tg_client._auth_failed = False
+
                 ok, detail = await connect_telegram()
                 if not ok:
                     logger.warning("telegram_listener_not_ready", extra={"detail": detail})
