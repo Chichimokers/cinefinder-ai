@@ -57,7 +57,8 @@ async def run_deep_search_job(search_id: str) -> dict | None:
                 from app.telegram.client import get_telegram_client
 
                 async with sessionmaker() as notify_db:
-                    key = f"pending_files:{chat_id}"
+                    requester = search.requester_id or chat_id
+                    key = f"pending_files:{requester}"
                     res = await notify_db.execute(select(SystemSetting).where(SystemSetting.key == key))
                     setting = res.scalar_one_or_none()
                     value = {"search_id": search_id, "results": output.get("results", [])[:10]}

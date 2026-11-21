@@ -13,6 +13,15 @@ from telethon.tl.types import Message
 
 from app.catalog.service import get_movie_by_code, search_catalog
 from app.config import settings
+from app.services.access_control import (
+    UNAUTHORIZED_MESSAGE,
+    authorize,
+    check_access,
+    is_owner_id,
+    list_authorized,
+    revoke,
+    user_info,
+)
 from app.database.models import AppUser, AuthorizedSource, FileSearch, SystemSetting, TelegramMessage
 from app.database.session import get_sessionmaker
 from app.search.image_similarity import dhash
@@ -28,9 +37,13 @@ logger = get_logger(__name__)
 
 COMMANDS = (
     "!busca", "!info", "!stats", "!ultimas", "!ayuda", "!estado",
-    "!autorizar", "!desautorizar", "!enviar",
-    "!archivos", "!infoarchivo", "!enviararchivo", "!cancelar",
+    "!autorizar", "!desautorizar", "!autorizados", "!id",
+    "!enviar", "!archivos", "!infoarchivo", "!enviararchivo", "!cancelar",
 )
+ADMIN_COMMANDS = {
+    "/autorizar", "!autorizar", "/desautorizar", "!desautorizar",
+    "/autorizados", "!autorizados", "/info", "!infoadmin", "/id", "!id",
+}
 MAX_MEDIA_OFFERS = 5
 ALBUM_DEBOUNCE_SECONDS = 1.5
 
@@ -40,8 +53,11 @@ HELP = """🤖 CineFinder AI — Comandos
 !stats — estadísticas del catálogo
 !ultimas — últimas incorporationes
 !estado — estado del sistema
-!autorizar <ID> [usuario] — autoriza a otro usuario (solo propietario)
-!desautorizar <ID> — revoca la autorización (solo propietario)
+/autorizar @usuario — autoriza a un usuario (solo propietario)
+/desautorizar @usuario — revoca la autorización (solo propietario)
+/autorizados — lista de usuarios autorizados (solo propietario)
+/info @usuario — información de autorización (solo propietario; también !infoadmin)
+/id — muestra tu Telegram User ID
 !enviar <n> — envía el archivo de Telegram elegido (solo fuentes autorizadas)
 !archivos [texto] — búsqueda profunda en TODO tu historial de Telegram (admitime imagen)
 !infoarchivo <n> — detalles de un resultado de búsqueda profunda
@@ -52,16 +68,34 @@ HELP = """🤖 CineFinder AI — Comandos
 
 
 async def is_authorized(db: AsyncSession, user_id: int) -> bool:
-    if settings.telegram_owner_id and user_id == settings.telegram_owner_id:
+    """Delegado al servicio central de acceso (validación en cada interacción)."""
+    from app.services.access_control import is_authorized as _is_authorized
+
+    return await _is_authorized(db, user_id)
+
+
+async def handle_admin_command(message: Message, command: str, argument: str) -> bool:
+    """Comandos administrativos exclusivos del propietario. Devuelve si se procesó."""
+    if command not in ADMIN_COMMANDS:
+        return False
+    sender_id = getattr(message, "sender_id", None)
+    if not is_owner_id(sender_id):
+        await answer(message, "⛔ Este comando es exclusivo del propietario.")
         return True
-    result = await db.execute(
-        select(AppUser).where(
-            AppUser.telegram_id == user_id,
-            AppUser.is_authorized.is_(True),
-            AppUser.is_banned.is_(False),
-        )
-    )
-    return result.scalar_one_or_none() is not None
+    async with get_sessionmaker()() as db:
+        if command in {"/autorizar", "!autorizar"}:
+            result = await authorize(db, argument)
+            await answer(message, result.get("message") or result.get("error", "Error"))
+        elif command in {"/desautorizar", "!desautorizar"}:
+            result = await revoke(db, argument)
+            await answer(message, result.get("message") or result.get("error", "Error"))
+        elif command in {"/autorizados", "!autorizados"}:
+            await answer(message, await list_authorized(db))
+        elif command in {"/info", "!infoadmin"}:
+            await answer(message, await user_info(db, argument))
+        elif command in {"/id", "!id"}:
+            await answer(message, f"🆔 Tu Telegram User ID: {sender_id}")
+    return True
 
 
 async def register_event(db: AsyncSession, message: Message, image_hashes: list[str]) -> bool:
@@ -150,7 +184,7 @@ async def handle_busca(message: Message, query: str, images: list[bytes]) -> Non
             progress=progress,
         )
     await answer(message, result.get("formatted_answer") or "⚠️ Sin respuesta del agente.")
-    if result.get("telegram_media") and message.sender_id == settings.telegram_owner_id:
+    if result.get("telegram_media"):
         await offer_telegram_media(message, job.id, result["telegram_media"])
 
 
@@ -237,8 +271,10 @@ def _telegram_link(chat_id: int, message_id: int) -> str:
     return f"tg://openmessage?chat_id={chat_id}&message_id={message_id}"
 
 
-async def _pending_key(chat_id: int) -> str:
-    return f"pending_media:{chat_id}"
+async def _pending_key(chat_id: int, user_id: int | None = None) -> str:
+    """Clave de sesión por usuario: impide cruzar resultados entre usuarios."""
+    owner_key = user_id if is_owner_id(user_id) else (user_id or chat_id)
+    return f"pending_media:{owner_key}"
 
 
 async def offer_telegram_media(message: Message, job_id: str, media: list[dict]) -> None:
@@ -260,7 +296,7 @@ async def offer_telegram_media(message: Message, job_id: str, media: list[dict])
     rows.append([Button.inline("Cancelar", data=b"cfmedia:cancel")])
 
     async with get_sessionmaker()() as db:
-        key = await _pending_key(message.chat_id)
+        key = await _pending_key(message.chat_id, message.sender_id)
         result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
         setting = result.scalar_one_or_none()
         value = {"job_id": job_id, "media": offers}
@@ -274,13 +310,15 @@ async def offer_telegram_media(message: Message, job_id: str, media: list[dict])
 
 
 async def deliver_selected_media(chat_id: int, sender_id: int, job_id: str | None, index: int) -> None:
-    """Entrega el archivo elegido solo si la fuente está autorizada."""
-    if sender_id != settings.telegram_owner_id:
-        await answer_safe(chat_id, "⛔ Solo el propietario puede solicitar archivos.")
-        return
+    """Entrega el archivo elegido solo a usuarios con acceso y fuente autorizada."""
+    async with get_sessionmaker()() as db:
+        access = await check_access(db, sender_id)
+        if not access["allowed"]:
+            await answer_safe(chat_id, UNAUTHORIZED_MESSAGE)
+            return
 
     async with get_sessionmaker()() as db:
-        key = await _pending_key(chat_id)
+        key = await _pending_key(chat_id, sender_id)
         result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
         setting = result.scalar_one_or_none()
         if setting is None or not setting.value:
@@ -348,9 +386,6 @@ async def answer_safe(chat_id: int, text: str) -> None:
 
 
 async def start_deep_search(message: Message, query: str, images: list[bytes]) -> None:
-    if message.sender_id != settings.telegram_owner_id:
-        await answer(message, "⛔ Solo el propietario puede iniciar búsquedas profundas.")
-        return
     features = None
     if images:
         try:
@@ -372,10 +407,11 @@ async def start_deep_search(message: Message, query: str, images: list[bytes]) -
     await answer(message, f"✅ Búsqueda profunda encolada (`{search_id}`). Te avisaré al terminar.")
 
 
-async def _get_pending_files(chat_id: int) -> tuple[str, list[dict]]:
+async def _get_pending_files(chat_id: int, user_id: int | None = None) -> tuple[str, list[dict]]:
+    key = f"pending_files:{user_id or chat_id}"
     async with get_sessionmaker()() as db:
         result = await db.execute(
-            select(SystemSetting).where(SystemSetting.key == f"pending_files:{chat_id}")
+            select(SystemSetting).where(SystemSetting.key == key)
         )
         setting = result.scalar_one_or_none()
         if not setting or not setting.value:
@@ -384,7 +420,7 @@ async def _get_pending_files(chat_id: int) -> tuple[str, list[dict]]:
 
 
 async def show_file_info(message: Message, argument: str) -> None:
-    _, results = await _get_pending_files(message.chat_id)
+    _, results = await _get_pending_files(message.chat_id, message.sender_id)
     if not results or not argument.isdigit():
         await answer(message, "No hay resultados recientes. Usa !archivos primero.")
         return
@@ -400,10 +436,12 @@ async def show_file_info(message: Message, argument: str) -> None:
 
 
 async def deliver_indexed_file(message: Message, argument: str) -> None:
-    if message.sender_id != settings.telegram_owner_id:
-        await answer(message, "⛔ Solo el propietario puede recibir archivos.")
+    async with get_sessionmaker()() as db:
+        access = await check_access(db, message.sender_id)
+    if not access["allowed"]:
+        await answer(message, UNAUTHORIZED_MESSAGE)
         return
-    _, results = await _get_pending_files(message.chat_id)
+    _, results = await _get_pending_files(message.chat_id, message.sender_id)
     if not results or not argument.isdigit():
         await answer(message, "No hay resultados recientes. Usa !archivos primero.")
         return
@@ -451,7 +489,7 @@ async def deliver_indexed_file(message: Message, argument: str) -> None:
 
 
 async def cancel_deep_search(message: Message) -> None:
-    search_id, _ = await _get_pending_files(message.chat_id)
+    search_id, _ = await _get_pending_files(message.chat_id, message.sender_id)
     if not search_id:
         await answer(message, "No hay una búsqueda profunda reciente.")
         return
@@ -505,16 +543,30 @@ def register_handlers(client: Any) -> None:
         if not message:
             return
         sender_id = getattr(message, "sender_id", None)
-        if sender_id is None or sender_id == settings.telegram_owner_id:
-            pass  # mensajes guardados / propio dueño: permitidos
+
+        # Validación de acceso en CADA interacción.
         async with get_sessionmaker()() as db:
-            if not await is_authorized(db, sender_id or 0):
-                return
+            access = await check_access(db, sender_id)
 
         text = message.text or ""
         parts = text.strip().split(maxsplit=1)
         command = parts[0].lower() if parts else ""
         argument = parts[1] if len(parts) > 1 else ""
+
+        # Comandos administrativos (solo propietario), incluso para usuarios sin autorizar.
+        if command in ADMIN_COMMANDS:
+            await handle_admin_command(message, command, argument)
+            return
+
+        if command == "/start" or command == "!start":
+            await answer(message, "🤖 CineFinder AI. Usa !ayuda para ver los comandos.")
+            return
+
+        if not access["allowed"]:
+            # Solo se responde en chats privados; en grupos se ignora para no molestar.
+            if message.chat_id == sender_id:
+                await answer(message, UNAUTHORIZED_MESSAGE)
+            return
 
         if command not in COMMANDS:
             return
@@ -581,9 +633,14 @@ def register_handlers(client: Any) -> None:
         parts = data.split(":")
         target_chat = getattr(event, "chat_id", None) or event.sender_id
         await event.answer()
+        async with get_sessionmaker()() as db:
+            access = await check_access(db, event.sender_id)
+        if not access["allowed"]:
+            await answer_safe(target_chat, UNAUTHORIZED_MESSAGE)
+            return
         if len(parts) >= 2 and parts[1] == "cancel":
             async with get_sessionmaker()() as db:
-                key = await _pending_key(target_chat)
+                key = await _pending_key(target_chat, event.sender_id)
                 result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
                 setting = result.scalar_one_or_none()
                 if setting:
@@ -593,7 +650,8 @@ def register_handlers(client: Any) -> None:
         if len(parts) != 3 or not parts[2].isdigit():
             await answer_safe(target_chat, "Selección no válida.")
             return
-        await deliver_selected_media(target_chat, event.sender_id, parts[1], int(parts[2]))
+        if parts[1] != "cancel":
+            await deliver_selected_media(target_chat, event.sender_id, parts[1], int(parts[2]))
 
 
 async def run_telegram_worker() -> None:

@@ -184,6 +184,27 @@ Solo responde al propietario (`TELEGRAM_OWNER_ID`) y a usuarios autorizados. Ded
 
 ---
 
+## Control de acceso (usuarios autorizados)
+
+El propietario es únicamente la cuenta configurada en `TELEGRAM_OWNER_ID`, con acceso absoluto. No puede ser revocado.
+
+Comandos administrativos (solo propietario, en conversación privada):
+
+| Comando | Función |
+|---|---|
+| `/autorizar @usuario` | Resuelve el username a Telegram User ID real y lo autoriza |
+| `/desautorizar @usuario` | Revoca el acceso inmediatamente |
+| `/autorizados` | Lista usuarios autorizados |
+| `/info @usuario` (o `!infoadmin`) | Estado de autorización de un usuario |
+| `/id` | Muestra tu Telegram User ID |
+
+- El username se resuelve con Telethon (`get_entity`) y se guarda el **ID numérico** como referencia principal; si el usuario cambia de username, se actualiza al volver a autorizarlo.
+- La validación se ejecuta en **cada mensaje y cada callback**, no solo al iniciar.
+- Los usuarios no autorizados reciben: «⛔ No tienes autorización para utilizar CineFinder AI. Contacta con el administrador.»
+- Las sesiones de búsqueda y los resultados se aíslan por usuario (`pending_files:<user_id>`, `pending_media:<user_id>`): nadie puede consultar o recuperar resultados ajenos.
+- Los usuarios autorizados pueden buscar, ver resultados y recibir archivos de fuentes autorizadas, pero **no pueden autorizar a otros ni usar comandos administrativos**.
+- Si se revoca un permiso, el acceso se pierde en el acto (se marca `is_banned`).
+
 ## 7. API HTTP
 
 ```powershell
