@@ -47,6 +47,9 @@ COBERTURA OBLIGATORIA (usa todas las que apliquen):
 - search_telegram_authorized para buscar en fuentes de Telegram autorizadas.
 - search_telegram_all_channels (solo propietario) para rastrear TODOS los chats y
   canales accesibles al userbot cuando el usuario lo pida o haya poca evidencia.
+  Si el usuario solo envió una foto, usa como término de búsqueda el texto leído
+  en la imagen (por ejemplo 'FROM') y las pistas visuales; NUNCA dejes la búsqueda
+  de Telegram sin términos. Repite con otras palabras clave si no hay resultados.
 - verify_movie_identity, compare_movie_candidates, calculate_confidence, verify_source.
 - Guarda solo con confianza suficiente (save_movie) y publica en el índice.
 
@@ -161,16 +164,46 @@ async def _record_usage(db: AsyncSession, job_id: str | None, usage: dict, model
     await db.flush()
 
 
-def _fallback_args(name: str, ctx: ToolContext, query: str, candidates: list[dict], analysis: str) -> dict:
-    title = query
+def _derive_query(query: str, analysis: str, candidates: list[dict]) -> str:
+    """Obtiene términos de búsqueda incluso cuando el usuario solo envió una foto."""
+    if query and query.strip():
+        return query.strip()
     if candidates:
-        title = str(candidates[0].get("title") or query)
+        first = candidates[0]
+        title = str(first.get("title") or "").strip()
+        if title:
+            return title + (f" {first.get('year')}" if first.get("year") else "")
+    if analysis:
+        import json
+        import re
+
+        try:
+            data = json.loads(analysis)
+            text_found = data.get("text_found")
+            if text_found:
+                return " ".join(str(text_found).split())[:120]
+            titles = data.get("possible_titles") or []
+            if titles:
+                return " ".join(str(t) for t in titles[:2])[:120]
+        except Exception:  # noqa: BLE001
+            pass
+        words = re.findall(r"[A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚáéíóúñ]{2,}", analysis)
+        if words:
+            return " ".join(dict.fromkeys(words[:4]))
+    return ""
+
+
+def _fallback_args(name: str, ctx: ToolContext, query: str, candidates: list[dict], analysis: str) -> dict:
+    derived = _derive_query(query, analysis, candidates)
+    title = derived
+    if candidates:
+        title = str(candidates[0].get("title") or derived)
     year = None
     if candidates:
         raw = candidates[0].get("year")
         if str(raw).isdigit():
             year = int(raw)
-    common = {"query": query or title}
+    common = {"query": derived or title}
     with_year = {"title": title, "year": year} if year is not None else {"title": title}
     mapping: dict[str, dict] = {
         "analyze_image": {},
@@ -344,7 +377,9 @@ async def run_agent(
                 "verify_movie_identity",
                 "calculate_confidence",
             ]
-            missing = [n for n in essential if n and n not in tools_called]
+            # Se considera "cubierta" solo la herramienta que devolvió datos válidos:
+            # si el modelo la llamó con argumentos vacíos, se repite con keywords derivadas.
+            missing = [n for n in essential if n and n not in tool_results]
             if missing:
                 await _emit(progress, ctx.job_id, {
                     "type": "step", "step": steps + 1,

@@ -1,3 +1,4 @@
+from app.ai.agent import _derive_query
 from app.database.base import Base
 from app.catalog.service import normalize_title
 from app.services.research import parse_agent_answer
@@ -16,6 +17,13 @@ def test_all_tables_registered():
 
 def test_normalize_title():
     assert normalize_title("El Viaje de Chihiro (2001)") == "el viaje de chihiro 2001"
+
+
+def test_derive_query_from_image_only():
+    analysis = '{"text_found": "FROM THE OTHER SIDE", "visual_clues": ["ghost"]}'
+    assert _derive_query("", analysis, []) == "FROM THE OTHER SIDE"
+    assert _derive_query("warmachine", analysis, []) == "warmachine"
+    assert _derive_query("", "", [{"title": "War Machine", "year": 2017}]) == "War Machine 2017"
 
 
 def test_parse_agent_answer():

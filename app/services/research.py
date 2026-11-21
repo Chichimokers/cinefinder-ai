@@ -67,48 +67,100 @@ def build_catalog_caption(movie: Any, sources: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _visual_summary(agent: AgentResult) -> list[str]:
+    import json
+
+    for name in ("analyze_image", "analyze_multiple_images"):
+        for payload in agent.tool_results.get(name, []):
+            raw = payload.get("analysis")
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except Exception:  # noqa: BLE001
+                data = {}
+            clues = [str(c) for c in (data.get("visual_clues") or [])][:3]
+            text_found = str(data.get("text_found") or "").strip()
+            result = [f"Texto visible: {text_found[:90]}"] if text_found else []
+            result += [f"Pista: {c[:90]}" for c in clues]
+            if result:
+                return result
+    for payload in agent.tool_results.get("extract_text_from_image", []):
+        text = str(payload.get("text") or "").strip()
+        if text:
+            return [f"Texto visible: {text[:120]}"]
+    return []
+
+
+def _telegram_scan_summary(agent: AgentResult) -> str:
+    for payload in agent.tool_results.get("search_telegram_all_channels", []):
+        scanned = payload.get("dialogs_scanned", 0)
+        total = payload.get("total", 0)
+        return f"Telegram completo: {scanned} chats/canales revisados → {total} coincidencias"
+    for payload in agent.tool_results.get("search_telegram_authorized", []):
+        total = len(payload.get("results", []))
+        return f"Telegram (fuentes autorizadas) → {total} coincidencias"
+    return "Telegram: búsqueda no disponible en esta sesión"
+
+
 def format_professional_answer(
     parsed: dict, movie: dict | None, confidence: float, publication: dict | None, agent: AgentResult
 ) -> str:
-    """Respuesta final profesional, legible en Telegram y en la API."""
-    if movie:
-        header = f"🎬 *{movie.get('code', '')} — {movie.get('title', '')}*"
+    """Informe claro y escaneable: qué vi, dónde busqué, qué encontré y qué hacer."""
+    identified = movie is not None
+    if identified:
+        title = f"{movie.get('code', '')} — {movie.get('title', '')}"
         if movie.get("year"):
-            header += f" ({movie['year']})"
-        lines = [header]
+            title += f" ({movie['year']})"
+        lines = [f"🎬 RESULTADO: {title}", f"Confianza: {confidence:.0%}"]
     else:
-        lines = ["🔎 *Resultado de la investigación*"]
+        lines = ["🔎 RESULTADO: no pude identificar la película con seguridad",
+                 f"Confianza: {confidence:.0%} · estado: {parsed.get('verification_status') or 'sin verificar'}"]
 
-    lines.append(f"📊 Confianza: *{confidence:.0%}*")
-    status = parsed.get("verification_status") or ("verificado" if movie else "sin verificar")
-    lines.append(f"✅ Estado: {status}")
+    visual = _visual_summary(agent)
+    if visual:
+        lines.append("\n📌 LO QUE VI EN LA IMAGEN")
+        lines.extend(f"• {item}" for item in visual[:4])
 
-    reasoning = parsed.get("reasoning") or parsed.get("raw")
+    lines.append("\n🔎 DÓNDE BUSQUÉ")
+    lines.append(f"• {_telegram_scan_summary(agent)}")
+    lines.append("• Catálogo interno + bases de datos (TMDB, OMDb, Wikidata, web, YouTube, Internet Archive)")
+    lines.append("• Imágenes y texto de la propia foto")
+
+    candidates = parsed.get("alternatives") or agent.candidates[:4]
+    if candidates:
+        lines.append("\n🎯 CANDIDATOS / HALLAZGOS")
+        for item in candidates[:4]:
+            label = str(item.get("title") or item.get("chat") or "")
+            year = item.get("year") or ""
+            lines.append(f"• {label}" + (f" ({year})" if year else ""))
+    else:
+        lines.append("\n🎯 HALLAZGOS")
+        lines.append("• Ninguna coincidencia verificable en las fuentes consultadas.")
+
+    reasoning = str(parsed.get("reasoning") or parsed.get("raw") or "").strip()
     if reasoning:
-        lines.append(f"\n🧠 *Análisis*\n{str(reasoning)[:900]}")
+        lines.append("\n🧠 POR QUÉ")
+        lines.append(" ".join(reasoning.split())[:380])
+
+    if not identified:
+        lines.append("\n👉 SIGUIENTE PASO")
+        lines.append("Envía otro ángulo/cartel más nítido o añade texto (año, actor, director). "
+                     "También puedo repetir la búsqueda en Telegram con otra palabra clave de la imagen.")
 
     sources = parsed.get("sources") or []
     if sources:
-        lines.append("\n🔗 *Fuentes verificables*")
-        for source in sources[:6]:
+        lines.append("\n🔗 FUENTES")
+        for source in sources[:5]:
             provider = source.get("provider", "fuente")
-            external = source.get("external_id") or ""
             url = source.get("url")
-            label = f"• {provider}" + (f" · {external}" if external else "")
-            lines.append(f"{label}: {url}" if url else label)
+            lines.append(f"• {provider}: {url}" if url else f"• {provider}")
 
-    alternatives = parsed.get("alternatives") or []
-    if alternatives:
-        lines.append("\n🔄 *Alternativas consideradas*")
-        for alt in alternatives[:4]:
-            lines.append(f"• {alt.get('title')}" + (f" ({alt.get('year')})" if alt.get("year") else ""))
-
-    lines.append(f"\n🛠️ Herramientas: {', '.join(agent.tools_called[:12])}")
-    lines.append(f"🧩 Pasos: {agent.steps} | Tokens: {agent.usage.get('total_tokens', 0)}")
     if publication:
-        lines.append(f"📚 Publicado en el índice privado (mensaje {publication.get('message_id')}).")
-    if parsed.get("need_review"):
-        lines.append("\n⚠️ Se recomienda revisión manual antes de darla por definitiva.")
+        lines.append(f"\n📚 Publicado en el índice privado (mensaje {publication.get('message_id')}).")
+
+    lines.append(f"\n🛠️ {len(agent.tools_called)} herramientas · {agent.steps} pasos · "
+                 f"{agent.usage.get('total_tokens', 0)} tokens")
     return "\n".join(lines)
 
 
