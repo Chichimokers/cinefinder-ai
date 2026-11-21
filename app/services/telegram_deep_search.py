@@ -271,7 +271,7 @@ async def _process_batch(
             height=metadata["height"],
             reply_to=getattr(message, "reply_to_msg_id", None),
         ))
-        if metadata["has_media"] and metadata["file_name"]:
+        if metadata["has_media"] and (metadata["file_name"] or metadata["mime_type"]):
             await _register_indexed_file(db, dialog, message, metadata, variants)
     search.messages_scanned += processed
     await db.flush()
@@ -285,14 +285,16 @@ async def _register_indexed_file(
     metadata: dict[str, Any],
     variants: list[str],
 ) -> IndexedFile | None:
-    file_name = metadata["file_name"]
+    file_name = metadata["file_name"] or (
+        f"foto_{message.id}.jpg" if metadata.get("mime_type", "").startswith("image/")
+        else f"archivo_{message.id}"
+    )
     size = metadata["file_size"] or 0
     category, ext = classify_file(file_name, metadata["mime_type"])
     searchable = f"{file_name} {getattr(message, 'message', '') or ''}"
     score, variant, matched = score_match(variants, searchable, file_name)
-    # Solo se indexan archivos con relación mínima con la búsqueda.
-    if variants and score < 40:
-        return None
+    # Se indexan todos los archivos multimedia para que futuras búsquedas puedan
+    # encontrarlos sin reescanear; la puntuación se aplica al devolver resultados.
     key_source = f"{normalize(file_name)}|{size}|{ext}"
     file_key = hashlib.sha256(key_source.encode()).hexdigest()
     exists = await db.execute(select(IndexedFile).where(IndexedFile.file_key == file_key))
@@ -416,6 +418,28 @@ async def run_file_search(db: AsyncSession, search: FileSearch) -> dict:
         await _progress(db, search, "inspeccionando_historiales")
 
     await _progress(db, search, "analizando_archivos")
+    # Backfill: mensajes ya indexados en ejecuciones anteriores que aún no tienen
+    # su entrada en indexed_files (evita perder archivos tras una reanudación).
+    pending = await db.execute(
+        select(TelegramMessageIndex).where(
+            TelegramMessageIndex.has_media.is_(True),
+        ).limit(5000)
+    )
+    dialogs_by_id = {d.dialog_id: d for d in dialogs}
+    for msg in pending.scalars().all():
+        dialog = dialogs_by_id.get(msg.dialog_id)
+        if dialog is None:
+            dialog = TelegramDialog(dialog_id=msg.dialog_id, scan_status="complete")
+        await _register_indexed_file(
+            db, dialog, msg, {
+                "file_name": msg.file_name,
+                "file_size": msg.file_size,
+                "mime_type": msg.mime_type,
+                "has_media": True,
+            }, search.query_variants,
+        )
+    await db.flush()
+
     results = await collect_results(db, search)
 
     await _progress(db, search, "indexando_coincidencias")
