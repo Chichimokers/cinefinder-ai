@@ -135,6 +135,47 @@ py -3.12 scripts\authorize_source.py -1001234567890 --name "Mi canal"
 
 Esto evita la distribución automática de copias no autorizadas de contenido comercial.
 
+---
+
+## Búsqueda profunda multichat de Telegram
+
+Motor privado de búsqueda sobre el historial accesible de la cuenta vinculada.
+
+### Comandos
+
+| Comando | Función |
+|---|---|
+| `!archivos [texto]` | Búsqueda profunda en todos los chats/grupos/canales (admitime una imagen) |
+| `!infoarchivo <n>` | Metadatos de un resultado (tamaño, origen, coincidencia) |
+| `!enviararchivo <n>` | Reenvía exactamente el archivo elegido |
+| `!cancelar` | Cancela la búsqueda en curso |
+
+También se puede usar la API:
+
+```
+POST /api/v1/files/search   {"query":"Blender Story","async":true}
+GET  /api/v1/files/searches/{search_id}
+POST /api/v1/files/searches/{search_id}/cancel
+```
+
+### Funcionamiento
+
+- **Descubrimiento:** `iter_dialogs(archived=True/False)` inventaría chats, grupos, supergrupos y canales (incluidos archivados) en `telegram_dialogs`.
+- **Historial:** `iter_messages` paginado en lotes de 100 desde `last_scanned_message_id`, con reanudación y límite configurable (`DEEP_SEARCH_MAX_MESSAGES`, `DEEP_SEARCH_MAX_DIALOGS`). Se registran los chats inaccesibles y el motivo (`FloodWait`, `RPCError`).
+- **Índice:** `telegram_messages_index` guarda texto, caption, nombre de archivo, tamaño, MIME, duración y resolución **sin descargar archivos**. `indexed_files` y `telegram_media_references` conservan la referencia exacta para recuperar el original.
+- **Variantes:** se generan título, sin acentos/puntuación, año, temporada/episodio y alias (`app/search/text_variants.py`). La puntuación 0-100 procede de coincidencias reales, nunca inventada.
+- **Imágenes:** dHash de 64 bits para comparar la imagen enviada con las encontradas (`app/search/image_similarity.py`).
+- **Progreso:** etapas reales publicadas en `GET /api/v1/jobs/{id}/events` y notificadas por Telegram al terminar.
+- **Recuperación:** las búsquedas interrumpidas se reencolan tras 30 minutos; el escaneo es incremental para no repetir historiales ya cubiertos.
+
+### Entrega
+
+`!enviararchivo <n>` usa `forward_messages` con el `dialog_id` y `message_id` exactos del resultado, sin volver a buscar. Solo se entrega si el chat está registrado como fuente autorizada; si no, se devuelve el enlace al mensaje original.
+
+### Resultado verificado
+
+En la cuenta vinculada: **200 conversaciones descubiertas**, **24.297 mensajes indexados**, **15.996 archivos indexados**, 0 duplicados. Una búsqueda real de «Blender Story» devolvió 3 archivos `.rar` con 97 % de coincidencia. Algunos chats pueden ser inaccesibles o tener historial pendiente: el informe lo indica en lugar de afirmar cobertura total.
+
 Solo responde al propietario (`TELEGRAM_OWNER_ID`) y a usuarios autorizados. Deduplica eventos y agrupa álbumes por `grouped_id`.
 
 ### Canal privado de índices
