@@ -84,7 +84,7 @@ async def lifespan(app: FastAPI):
 
                 ok, detail = await connect_telegram()
                 if not ok:
-                    logger.warning("telegram_listener_not_ready", extra={"detail": detail})
+                    logger.warning(f"telegram_listener_not_ready: {detail}")
                     await asyncio.sleep(10)
                     continue
                 client = get_telegram_client()

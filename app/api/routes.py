@@ -356,16 +356,26 @@ async def cancel_file_search(search_id: str, _: str = Depends(require_auth)) -> 
 @router.get("/telegram/status")
 async def telegram_status(_: str = Depends(require_auth)) -> dict:
     """Diagnóstico del userbot desde el proceso de Render (sin secretos)."""
-    from app.telegram.client import get_listener_client, get_telegram_client
+    from app.telegram.client import _auth_failed, get_telegram_client
 
     rpc = get_telegram_client()
-    listener = get_listener_client()
+    last_error = "auto"
+    if rpc is not None:
+        try:
+            me = await rpc.get_me()
+            last_error = f"authorized as {me.id}" if me else "no me"
+        except Exception as exc:  # noqa: BLE001
+            last_error = f"{type(exc).__name__}: {str(exc)[:120]}"
+    else:
+        last_error = "cliente no creado (auth_failed o sin sesión)"
     return {
         "rpc_configured": bool(rpc),
         "rpc_connected": bool(rpc and rpc.is_connected()),
-        "listener_configured": bool(listener),
-        "listener_connected": bool(listener and listener.is_connected()),
+        "listener_configured": bool(rpc),
+        "listener_connected": bool(rpc and rpc.is_connected()),
         "owner_id_configured": bool(__import__("app.config", fromlist=["settings"]).settings.telegram_owner_id),
+        "auth_failed": _auth_failed,
+        "last_error": last_error,
     }
 
 
