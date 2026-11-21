@@ -302,7 +302,13 @@ async def search_files(payload: FileSearchRequest, background_tasks: BackgroundT
         await db.commit()
         search_id = search.id
     if payload.async_mode:
-        background_tasks.add_task(run_deep_search_job, search_id)
+        async def _safe_run(sid: str) -> None:
+            try:
+                await run_deep_search_job(sid)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("file_search_task_crashed", extra={"error": type(exc).__name__})
+
+        background_tasks.add_task(_safe_run, search_id)
         return JSONResponse(status_code=202, content={"search_id": search_id, "status": "queued"})
     result = await run_deep_search_job(search_id)
     return JSONResponse(status_code=200, content=result or {"search_id": search_id, "status": "failed"})

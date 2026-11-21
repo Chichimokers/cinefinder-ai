@@ -6,6 +6,8 @@ import asyncio
 
 from sqlalchemy import select
 
+from app.database.models import SystemSetting
+
 from app.database.models import FileSearch
 from app.database.session import get_sessionmaker
 from app.services.events import publish
@@ -52,9 +54,6 @@ async def run_deep_search_job(search_id: str) -> dict | None:
                 "type": "deep_results", "message": "Búsqueda finalizada", "data": output
             })
             if chat_id:
-                from sqlalchemy import select
-
-                from app.database.models import SystemSetting
                 from app.telegram.client import get_telegram_client
 
                 async with sessionmaker() as notify_db:
@@ -74,7 +73,7 @@ async def run_deep_search_job(search_id: str) -> dict | None:
             return output
         except Exception as exc:  # noqa: BLE001
             search.status = "failed"
-            search.error = type(exc).__name__
+            search.error = f"{type(exc).__name__}: {str(exc)[:200]}"
             await db.commit()
             logger.warning("deep_search_failed", extra={"error": type(exc).__name__})
             return None
@@ -90,6 +89,12 @@ async def process_pending_deep_searches(limit: int = 2) -> int:
         searches = result.scalars().all()
         ids = [s.id for s in searches]
         await db.commit()
+    async def _safe_run(search_id: str) -> None:
+        try:
+            await run_deep_search_job(search_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("deep_search_task_crashed", extra={"error": type(exc).__name__})
+
     for search_id in ids:
-        asyncio.create_task(run_deep_search_job(search_id))
+        asyncio.create_task(_safe_run(search_id))
     return len(ids)
