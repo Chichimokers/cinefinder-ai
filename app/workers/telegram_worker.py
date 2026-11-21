@@ -140,52 +140,89 @@ async def answer(message: Message, text: str) -> None:
         await client.send_message(message.chat_id, text, reply_to=message.id)
 
 
+def _truncate(text: str, limit: int = 3000) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+async def _edit_status(client, chat_id: int, message_id: int, lines: list[str]) -> None:
+    """Actualiza UN solo mensaje con el estado en vivo (streaming)."""
+    if client is None or not client.is_connected():
+        return
+    text = _truncate("\n".join(lines))
+    try:
+        await client.edit_message(chat_id, message_id, text)
+    except Exception:  # noqa: BLE001  (rate limit o mensaje idéntico)
+        pass
+
+
 async def handle_busca(message: Message, query: str, images: list[bytes]) -> None:
-    await answer(message, "🔍 Iniciando investigación con todas las fuentes disponibles…")
     client = get_telegram_client()
+    if client is None or not client.is_connected():
+        return
+
+    header = [f"🔎 *Investigando*{' · ' + _truncate(query, 90) if query else ''}", ""]
+    status_msg = await client.send_message(message.chat_id, "\n".join(header))
+    status_id = int(status_msg.id)
+
+    state: dict[str, list[str]] = {
+        "pasos": [],
+        "razonamiento": [],
+        "fuentes": [],
+    }
 
     async def progress(event: dict) -> None:
-        """Muestra en vivo el razonamiento y las herramientas del agente."""
-        if client is None or not client.is_connected():
-            return
         kind = event.get("type")
         step = event.get("step")
-        text = ""
         if kind == "step":
-            text = f"🧠 *Paso {step}* — {event.get('message', '')}"
+            state["pasos"].append(f"🧠 Paso {step}: {event.get('message', '')}")
         elif kind == "thinking":
-            thought = (event.get("message") or "").strip()[:420]
+            thought = (event.get("message") or "").strip()
             if thought:
-                text = f"💭 *Razonamiento:* {thought}"
+                state["razonamiento"].append(_truncate(thought, 500))
+        elif kind == "deep_progress":
+            data = event.get("data") or {}
+            stage = str(data.get("stage") or "").replace("_", " ")
+            state["pasos"].append(
+                f"📊 {stage} · diálogos {data.get('dialogs_done', 0)}/{data.get('dialogs_total', 0)} "
+                f"· mensajes {data.get('messages_scanned', 0)}"
+            )
         elif kind == "tool_result":
             data = event.get("data") or {}
-            tool = data.get("tool", "herramienta")
-            state = "OK" if data.get("ok") else "sin datos"
-            text = f"🔧 *{tool}* → {state}\n{(data.get('summary') or '')[:260]}"
-        if text:
-            try:
-                await client.send_message(message.chat_id, text)
-            except Exception:  # noqa: BLE001
-                pass
+            if data.get("ok"):
+                tool = str(data.get("tool", ""))
+                if tool.startswith("search_") or tool.startswith("verify_"):
+                    state["fuentes"].append(f"✓ {tool}")
+
+        lines = list(header)
+        if state["pasos"]:
+            lines += ["*Progreso*"] + state["pasos"][-4:]
+        if state["razonamiento"]:
+            lines += ["", "*Razonamiento*"] + state["razonamiento"][-3:]
+        if state["fuentes"]:
+            lines += ["", "*Fuentes consultadas*"] + state["fuentes"][-8:]
+        await _edit_status(client, message.chat_id, status_id, lines)
 
     async with get_sessionmaker()() as db:
         job = await create_job(
             db,
             origin="telegram",
-            requester_id=str(message.chat_id),
+            requester_id=str(message.sender_id or message.chat_id),
             query=query,
             image_hashes=[hash_image(i) for i in images],
         )
         await db.commit()
         result = await run_search_job(
             db, job.id, query, images,
-            requester_id=str(message.chat_id),
+            requester_id=str(message.sender_id or message.chat_id),
             is_owner=message.sender_id == settings.telegram_owner_id,
             progress=progress,
         )
-    await answer(message, result.get("formatted_answer") or "⚠️ Sin respuesta del agente.")
+
+    final = result.get("formatted_answer") or "⚠️ Sin respuesta del agente."
+    await _edit_status(client, message.chat_id, status_id, [final])
     if result.get("telegram_media"):
-        await offer_telegram_media(message, job.id, result["telegram_media"])
+        await offer_telegram_media(message, job.id, result["telegram_media"], status_id)
 
 
 async def handle_info(message: Message, code: str) -> None:
@@ -277,8 +314,10 @@ async def _pending_key(chat_id: int, user_id: int | None = None) -> str:
     return f"pending_media:{owner_key}"
 
 
-async def offer_telegram_media(message: Message, job_id: str, media: list[dict]) -> None:
-    """Pregunta al propietario cuál de los archivos encontrados desea recibir."""
+async def offer_telegram_media(
+    message: Message, job_id: str, media: list[dict], status_message_id: int | None = None
+) -> None:
+    """Ofrece los archivos encontrados dentro del MISMO mensaje de estado."""
     if not media:
         return
     client = get_telegram_client()
@@ -306,7 +345,13 @@ async def offer_telegram_media(message: Message, job_id: str, media: list[dict])
             setting.value = value
         await db.flush()
 
-    await client.send_message(message.chat_id, "\n".join(lines), buttons=rows)
+    try:
+        if status_message_id:
+            await client.edit_message(message.chat_id, status_message_id, "\n".join(lines), buttons=rows)
+        else:
+            await client.send_message(message.chat_id, "\n".join(lines), buttons=rows)
+    except Exception:  # noqa: BLE001
+        await client.send_message(message.chat_id, "\n".join(lines), buttons=rows)
 
 
 async def deliver_selected_media(chat_id: int, sender_id: int, job_id: str | None, index: int) -> None:
@@ -462,7 +507,7 @@ async def deliver_indexed_file(message: Message, argument: str) -> None:
         )
         source = source_result.scalar_one_or_none()
 
-    link = f"tg://openmessage?chat_id={dialog_id}&message_id={message_id}"
+    link = _telegram_link(dialog_id, message_id)
     if source is None:
         await answer(
             message,
@@ -483,7 +528,11 @@ async def deliver_indexed_file(message: Message, argument: str) -> None:
             return
         # Reenvío directo: entrega exactamente el archivo seleccionado, sin descargarlo.
         await client.forward_messages(message.chat_id, message_id, dialog_id)
-        await answer(message, f"✅ Archivo enviado: {item.get('name') or item.get('title')}")
+        await answer(
+            message,
+            f"✅ Archivo enviado: {item.get('name') or item.get('title')}\n"
+            f"📎 Mensaje original: {link}",
+        )
     except Exception as exc:  # noqa: BLE001
         await answer(message, f"No se pudo enviar: {type(exc).__name__}. Enlace: {link}")
 
