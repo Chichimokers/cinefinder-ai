@@ -15,7 +15,6 @@ from telethon.tl.types import Message
 from app.catalog.service import get_movie_by_code, search_catalog
 from app.config import settings
 from app.services.access_control import (
-    UNAUTHORIZED_MESSAGE,
     authorize,
     check_access,
     is_owner_id,
@@ -80,8 +79,7 @@ async def handle_admin_command(message: Message, command: str, argument: str) ->
         return False
     sender_id = getattr(message, "sender_id", None)
     if not is_owner_id(sender_id):
-        await answer(message, "⛔ Este comando es exclusivo del propietario.")
-        return True
+        return True  # Silencio total: comandos administrativos ignorados.
 
     replied_id = None
     reply_msg = getattr(message, "reply_to_message", None)
@@ -360,8 +358,7 @@ async def deliver_selected_media(chat_id: int, sender_id: int, job_id: str | Non
     async with get_sessionmaker()() as db:
         access = await check_access(db, sender_id)
         if not access["allowed"]:
-            await answer_safe(chat_id, UNAUTHORIZED_MESSAGE)
-            return
+            return  # Silencio total para usuarios sin autorización.
 
     async with get_sessionmaker()() as db:
         key = await _pending_key(chat_id, sender_id)
@@ -495,8 +492,7 @@ async def deliver_indexed_file(message: Message, argument: str) -> None:
     async with get_sessionmaker()() as db:
         access = await check_access(db, message.sender_id)
     if not access["allowed"]:
-        await answer(message, UNAUTHORIZED_MESSAGE)
-        return
+        return  # Silencio total para usuarios sin autorización.
     _, results = await _get_pending_files(message.chat_id, message.sender_id)
     if not results or not argument.isdigit():
         await answer(message, "No hay resultados recientes. Usa !archivos primero.")
@@ -645,9 +641,7 @@ def register_handlers(client: Any) -> None:
             return
 
         if not access["allowed"]:
-            # Solo se responde en chats privados; en grupos se ignora para no molestar.
-            if message.chat_id == sender_id:
-                await answer(message, UNAUTHORIZED_MESSAGE)
+            # Usuarios no autorizados: silencio total, sin respuesta de ningún tipo.
             return
 
         # Responder solo con un número selecciona un archivo de la última búsqueda.
@@ -770,8 +764,7 @@ def register_handlers(client: Any) -> None:
         async with get_sessionmaker()() as db:
             access = await check_access(db, event.sender_id)
         if not access["allowed"]:
-            await answer_safe(target_chat, UNAUTHORIZED_MESSAGE)
-            return
+            return  # Silencio total para usuarios sin autorización.
         if len(parts) >= 2 and parts[1] == "cancel":
             async with get_sessionmaker()() as db:
                 key = await _pending_key(target_chat, event.sender_id)

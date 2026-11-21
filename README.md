@@ -207,7 +207,7 @@ Comandos administrativos (solo propietario, en conversación privada):
 - El username se resuelve con Telethon (`get_entity`) y se guarda el **ID numérico** como referencia principal; si el usuario cambia de username, se actualiza al volver a autorizarlo. Escribir un ID numérico a mano **no basta**: se verifica contra MTProto para evitar autorizar identificadores inventados.
 - **Recomendado:** responde al mensaje de la persona con `/autorizar` (sin argumentos). El bot toma el `sender_id` real de Telegram, sin depender de lo que escriba el usuario. Con `/id` respondiendo a un mensaje puedes ver el ID real de esa persona.
 - La validación se ejecuta en **cada mensaje y cada callback**, no solo al iniciar.
-- Los usuarios no autorizados reciben: «⛔ No tienes autorización para utilizar CineFinder AI. Contacta con el administrador.»
+- Los usuarios no autorizados **son ignorados por completo**: no reciben ningún mensaje ni respuesta (ni en privado ni en grupos). El bot tampoco responde a comandos administrativos de quien no sea propietario.
 - Las sesiones de búsqueda y los resultados se aíslan por usuario (`pending_files:<user_id>`, `pending_media:<user_id>`): nadie puede consultar o recuperar resultados ajenos.
 - Los usuarios autorizados pueden buscar, ver resultados y recibir archivos de fuentes autorizadas, pero **no pueden autorizar a otros ni usar comandos administrativos**.
 - Si se revoca un permiso, el acceso se pierde en el acto (se marca `is_banned`).
