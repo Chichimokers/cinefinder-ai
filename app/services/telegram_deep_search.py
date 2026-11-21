@@ -34,6 +34,7 @@ from app.database.models import (
 from app.search.image_similarity import dhash, similarity
 from app.search.text_variants import generate_variants, normalize, score_match
 from app.services.events import publish
+from app.services.telegram_deep_scan_helper import ensure_telegram_ready
 from app.telegram.client import get_telegram_client
 from app.utils.logging import get_logger
 
@@ -189,6 +190,8 @@ async def scan_dialog(
     oldest_seen: int | None = None
     try:
         entity = await client.get_entity(dialog.dialog_id)
+        if entity is None:
+            raise RuntimeError("entidad no accesible")
         batch: list[Any] = []
         async for message in client.iter_messages(
             entity, limit=BATCH_SIZE, offset_id=last_id, wait_time=0.5
@@ -397,6 +400,9 @@ async def collect_results(db: AsyncSession, search: FileSearch) -> list[dict]:
 async def run_file_search(db: AsyncSession, search: FileSearch) -> dict:
     """Orquesta una búsqueda profunda completa y devuelve los resultados."""
     search.status = "running"
+    await _progress(db, search, "conectando_telegram")
+    if not await ensure_telegram_ready():
+        raise RuntimeError("Userbot no conectado: revisa TELEGRAM_SESSION en Render")
     await _progress(db, search, "descubriendo_conversaciones")
     dialogs = await upsert_dialogs(db)
     search.dialogs_total = len(dialogs)
