@@ -353,6 +353,22 @@ async def cancel_file_search(search_id: str, _: str = Depends(require_auth)) -> 
     return {"search_id": search_id, "cancel_requested": True}
 
 
+@router.get("/telegram/status")
+async def telegram_status(_: str = Depends(require_auth)) -> dict:
+    """Diagnóstico del userbot desde el proceso de Render (sin secretos)."""
+    from app.telegram.client import get_listener_client, get_telegram_client
+
+    rpc = get_telegram_client()
+    listener = get_listener_client()
+    return {
+        "rpc_configured": bool(rpc),
+        "rpc_connected": bool(rpc and rpc.is_connected()),
+        "listener_configured": bool(listener),
+        "listener_connected": bool(listener and listener.is_connected()),
+        "owner_id_configured": bool(__import__("app.config", fromlist=["settings"]).settings.telegram_owner_id),
+    }
+
+
 @router.get("/openapi.json")
 async def openapi_json(_: str = Depends(require_auth)) -> dict:
     from app.main import app

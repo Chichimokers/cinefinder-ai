@@ -1,4 +1,12 @@
-"""Cliente Telegram (Telethon) con reconexión y detección de sesiones revocadas."""
+"""Clientes Telegram (Telethon) con reconexión y detección de sesiones revocadas.
+
+Se usan DOS clientes independientes con la MISMA sesión:
+- ``get_telegram_client``: para RPC puntuales (publicar, enviar, buscar).
+- ``get_listener_client``: para el bucle de escucha de eventos (run_until_disconnected).
+
+Telethon no permite compartir un único cliente entre un bucle de eventos
+persistente y llamadas RPC concurrentes de forma fiable; por eso se separan.
+"""
 
 from __future__ import annotations
 
@@ -19,64 +27,100 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 
 _client: TelegramClient | None = None
+_listener: TelegramClient | None = None
 _auth_failed = False
 _reconnect_attempts = 0
 
 
+def _make_client() -> TelegramClient | None:
+    if not (settings.telegram_api_id and settings.telegram_api_hash and settings.telegram_session):
+        return None
+    return TelegramClient(
+        StringSession(settings.telegram_session),
+        settings.telegram_api_id,
+        settings.telegram_api_hash,
+        connection_retries=3,
+        retry_delay=2,
+        auto_reconnect=True,
+    )
+
+
 def get_telegram_client() -> TelegramClient | None:
-    """Devuelve el cliente configurado; None si no hay sesión disponible."""
+    """Cliente para operaciones RPC puntuales."""
     global _client
     if _auth_failed:
         return None
     if _client is None:
-        if not (settings.telegram_api_id and settings.telegram_api_hash and settings.telegram_session):
-            return None
-        _client = TelegramClient(
-            StringSession(settings.telegram_session),
-            settings.telegram_api_id,
-            settings.telegram_api_hash,
-            connection_retries=3,
-            retry_delay=2,
-            auto_reconnect=True,
-        )
+        _client = _make_client()
     return _client
 
 
-async def connect_telegram() -> tuple[bool, str]:
-    """Conecta y valida la sesión. No reintenta autenticación si fue revocada."""
-    global _auth_failed, _reconnect_attempts
+def get_listener_client() -> TelegramClient | None:
+    """Cliente dedicado al bucle de escucha de eventos."""
+    global _listener
     if _auth_failed:
-        return False, "Sesión revocada: se requiere nueva autenticación local"
+        return None
+    if _listener is None:
+        _listener = _make_client()
+    return _listener
 
-    client = get_telegram_client()
-    if client is None:
-        return False, "Faltan credenciales de Telegram o TELEGRAM_SESSION"
 
+async def _authorize(client: TelegramClient) -> tuple[bool, str]:
     try:
         if not client.is_connected():
             await client.connect()
         if not await client.is_user_authorized():
-            _auth_failed = True
             return False, "Sesión no autorizada (revocada)"
         me = await client.get_me()
         expected = settings.telegram_owner_id
         if expected and me and me.id != expected:
             logger.warning("telegram_identity_mismatch")
             return False, "La cuenta autenticada no coincide con TELEGRAM_OWNER_ID"
-        _reconnect_attempts = 0
         return True, f"Conectado como usuario {me.id if me else 'desconocido'}"
     except (RPCError, SessionPasswordNeededError, OSError) as exc:
-        _reconnect_attempts += 1
-        if _reconnect_attempts >= 3:
-            _auth_failed = True
         return False, f"{type(exc).__name__} al conectar"
 
 
+async def connect_telegram() -> tuple[bool, str]:
+    """Conecta y valida el cliente de RPC. No reintenta si la sesión fue revocada."""
+    global _auth_failed, _reconnect_attempts
+    if _auth_failed:
+        return False, "Sesión revocada: se requiere nueva autenticación local"
+    client = get_telegram_client()
+    if client is None:
+        return False, "Faltan credenciales de Telegram o TELEGRAM_SESSION"
+    ok, detail = await _authorize(client)
+    if ok:
+        _reconnect_attempts = 0
+    else:
+        _reconnect_attempts += 1
+        if _reconnect_attempts >= 3 or "revocada" in detail:
+            _auth_failed = True
+        logger.warning("telegram_connect_failed", extra={"detail": detail})
+    return ok, detail
+
+
+async def connect_listener() -> tuple[bool, str]:
+    """Conecta y valida el cliente de escucha de forma independiente."""
+    global _auth_failed
+    if _auth_failed:
+        return False, "Sesión revocada"
+    client = get_listener_client()
+    if client is None:
+        return False, "Faltan credenciales de Telegram o TELEGRAM_SESSION"
+    ok, detail = await _authorize(client)
+    if not ok:
+        logger.warning("telegram_listener_connect_failed", extra={"detail": detail})
+    return ok, detail
+
+
 async def disconnect_telegram() -> None:
-    global _client
-    if _client and _client.is_connected():
-        await _client.disconnect()
+    global _client, _listener
+    for client in (_client, _listener):
+        if client and client.is_connected():
+            await client.disconnect()
     _client = None
+    _listener = None
 
 
 async def ensure_catalog_channel(db: AsyncSession) -> dict:
@@ -145,11 +189,11 @@ async def publish_to_catalog(
 async def reconnect_loop(stop_event: asyncio.Event) -> None:
     """Bucle de reconexión para el worker de Telegram."""
     while not stop_event.is_set():
-        ok, _ = await connect_telegram()
+        ok, _ = await connect_listener()
         if not ok:
             await asyncio.sleep(15)
             continue
-        client = get_telegram_client()
+        client = get_listener_client()
         assert client is not None
         try:
             await client.run_until_disconnected()

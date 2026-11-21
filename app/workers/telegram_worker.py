@@ -29,7 +29,7 @@ from app.services.jobs import create_job
 from app.services.telegram_deep_search import create_file_search
 from app.workers.deep_search_worker import run_deep_search_job
 from app.services.research import run_search_job
-from app.telegram.client import connect_telegram, get_telegram_client
+from app.telegram.client import connect_listener, get_listener_client, get_telegram_client
 from app.utils.logging import get_logger
 from app.utils.security import hash_image
 
@@ -291,7 +291,8 @@ async def handle_ultimas(message: Message) -> None:
 
 
 async def handle_estado(message: Message) -> None:
-    ok, detail = await connect_telegram()
+    client = get_telegram_client()
+    ok = bool(client and client.is_connected())
     nvidia_ok = bool(settings.nvidia_api_key and settings.nvidia_model)
     await answer(
         message,
@@ -782,11 +783,18 @@ def register_handlers(client: Any) -> None:
 
 
 async def run_telegram_worker() -> None:
-    ok, detail = await connect_telegram()
-    if not ok:
-        logger.warning("telegram_worker_not_connected", extra={"detail": detail})
-        return
-    client = get_telegram_client()
-    assert client is not None
-    register_handlers(client)
-    await client.run_until_disconnected()
+    """Arranca el bucle de escucha con su propio cliente y reconexión."""
+    while True:
+        ok, detail = await connect_listener()
+        if not ok:
+            logger.warning("telegram_worker_not_connected", extra={"detail": detail})
+            await asyncio.sleep(15)
+            continue
+        client = get_listener_client()
+        assert client is not None
+        register_handlers(client)
+        try:
+            await client.run_until_disconnected()
+        except Exception:  # noqa: BLE001
+            logger.warning("telegram_listener_disconnected")
+        await asyncio.sleep(5)

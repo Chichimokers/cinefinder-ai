@@ -67,28 +67,54 @@ async def lifespan(app: FastAPI):
 
     # Userbot opcional dentro del mismo proceso (ENABLE_TELEGRAM_WORKER=true).
     telegram_task: asyncio.Task | None = None
-    if os.environ.get("ENABLE_TELEGRAM_WORKER", "").lower() in {"1", "true", "yes"}:
-        try:
-            from app.telegram.client import connect_telegram, disconnect_telegram, get_telegram_client
-            from app.workers.telegram_worker import register_handlers
+    listener_stop = asyncio.Event()
 
-            ok, detail = await connect_telegram()
-            if ok:
-                client = get_telegram_client()
-                if client is not None:
-                    register_handlers(client)
-                    telegram_task = asyncio.create_task(client.run_until_disconnected())
-                    logger.info("telegram_worker_started_in_web_service")
-            else:
-                logger.warning("telegram_worker_not_started", extra={"detail": detail})
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("telegram_worker_start_failed", extra={"error": type(exc).__name__})
+    async def _telegram_supervisor() -> None:
+        """Mantiene el worker de escucha vivo; lo reinicia si se cae."""
+        from app.telegram.client import connect_listener, disconnect_telegram, get_listener_client
+        from app.workers.telegram_worker import register_handlers
+
+        while not listener_stop.is_set():
+            try:
+                ok, detail = await connect_listener()
+                if not ok:
+                    logger.warning("telegram_listener_not_ready", extra={"detail": detail})
+                    await asyncio.sleep(10)
+                    continue
+                client = get_listener_client()
+                if client is None:
+                    await asyncio.sleep(10)
+                    continue
+                register_handlers(client)
+                logger.info("telegram_worker_started_in_web_service")
+                await client.run_until_disconnected()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                from telethon.errors import AuthKeyDuplicatedError
+
+                if isinstance(exc, AuthKeyDuplicatedError):
+                    logger.warning("telegram_session_conflict_reconnecting")
+                    # La sesión fue invalidada por uso simultáneo desde otra IP.
+                    # Se reintroduce el StringSession original y se reinicia.
+                    from app.telegram import client as tg_client
+
+                    tg_client._listener = None
+                    tg_client._client = None
+                    tg_client._auth_failed = False
+                    await asyncio.sleep(10)
+                logger.warning("telegram_worker_crashed", extra={"error": type(exc).__name__})
+            await asyncio.sleep(5)
+
+    if os.environ.get("ENABLE_TELEGRAM_WORKER", "").lower() in {"1", "true", "yes"}:
+        telegram_task = asyncio.create_task(_telegram_supervisor())
 
     yield
 
     deep_search_task.cancel()
     await asyncio.gather(deep_search_task, return_exceptions=True)
 
+    listener_stop.set()
     if telegram_task is not None:
         telegram_task.cancel()
         await asyncio.gather(telegram_task, return_exceptions=True)
