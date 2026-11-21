@@ -57,7 +57,7 @@ async def _progress(db: AsyncSession, search: FileSearch, stage: str, **fields: 
     for key, value in fields.items():
         if hasattr(search, key):
             setattr(search, key, value)
-    await db.flush()
+    await db.commit()
     await publish(search.id, {
         "type": "deep_progress",
         "message": stage,
@@ -272,7 +272,7 @@ async def _process_batch(
             reply_to=getattr(message, "reply_to_msg_id", None),
         ))
         if metadata["has_media"] and (metadata["file_name"] or metadata["mime_type"]):
-            await _register_indexed_file(db, dialog, message, metadata, variants)
+            await _register_indexed_file(db, dialog, message, int(message.id), metadata, variants)
     search.messages_scanned += processed
     await db.flush()
     return processed
@@ -282,6 +282,7 @@ async def _register_indexed_file(
     db: AsyncSession,
     dialog: TelegramDialog,
     message: Any,
+    message_id: int,
     metadata: dict[str, Any],
     variants: list[str],
 ) -> IndexedFile | None:
@@ -301,11 +302,11 @@ async def _register_indexed_file(
     row = exists.scalar_one_or_none()
     if row is not None:
         return row
-    telegram_ref = f"tg://openmessage?chat_id={dialog.dialog_id}&message_id={message.id}"
+    telegram_ref = f"tg://openmessage?chat_id={dialog.dialog_id}&message_id={message_id}"
     row = IndexedFile(
         file_key=file_key,
         dialog_id=dialog.dialog_id,
-        message_id=int(message.id),
+        message_id=int(message_id),
         original_name=file_name,
         title=derive_title(file_name),
         category=category,
@@ -320,7 +321,7 @@ async def _register_indexed_file(
     await db.flush()
     db.add(TelegramMediaReference(
         dialog_id=dialog.dialog_id,
-        message_id=int(message.id),
+        message_id=int(message_id),
         file_name=file_name,
         size_bytes=size,
         mime_type=metadata["mime_type"],
@@ -410,35 +411,75 @@ async def run_file_search(db: AsyncSession, search: FileSearch) -> dict:
     search.dialogs_total = len(dialogs)
     await _progress(db, search, "inspeccionando_historiales")
 
-    for dialog in dialogs:
+    # Escaneo incremental: se reutiliza el índice existente. Solo se recorren
+    # de nuevo los diálogos pendientes, parciales, con error o sin escaneo reciente.
+    from datetime import timedelta
+
+    stale = datetime.now(timezone.utc) - timedelta(hours=1)
+    to_scan = [
+        d for d in dialogs
+        if d.scan_status in ("pending", "partial", "error")
+        or d.last_scan_at is None
+        or d.last_scan_at < stale
+    ]
+    skipped = len(dialogs) - len(to_scan)
+    logger.info("incremental_scan", extra={"to_scan": len(to_scan), "skipped": skipped})
+    for dialog in to_scan:
         if search.cancel_requested:
             break
         await scan_dialog(db, search, dialog, search.query_variants)
         search.dialogs_done += 1
         await _progress(db, search, "inspeccionando_historiales")
+    search.dialogs_done = len(dialogs)
 
     await _progress(db, search, "analizando_archivos")
-    # Backfill: mensajes ya indexados en ejecuciones anteriores que aún no tienen
-    # su entrada en indexed_files (evita perder archivos tras una reanudación).
-    pending = await db.execute(
+    # Backfill eficiente: mensajes ya indexados que aún no tienen entrada en
+    # indexed_files. Inserciones en lote para no bloquear la búsqueda.
+    await _progress(db, search, "indexando_archivos")
+    existing_keys = set((await db.execute(select(IndexedFile.file_key))).scalars().all())
+    pending = (await db.execute(
         select(TelegramMessageIndex).where(
             TelegramMessageIndex.has_media.is_(True),
-        ).limit(5000)
-    )
-    dialogs_by_id = {d.dialog_id: d for d in dialogs}
-    for msg in pending.scalars().all():
-        dialog = dialogs_by_id.get(msg.dialog_id)
-        if dialog is None:
-            dialog = TelegramDialog(dialog_id=msg.dialog_id, scan_status="complete")
-        await _register_indexed_file(
-            db, dialog, msg, {
-                "file_name": msg.file_name,
-                "file_size": msg.file_size,
-                "mime_type": msg.mime_type,
-                "has_media": True,
-            }, search.query_variants,
+        ).limit(10000)
+    )).scalars().all()
+    new_files: list[IndexedFile] = []
+    new_refs: list[TelegramMediaReference] = []
+    for msg in pending:
+        file_name = msg.file_name or f"archivo_{msg.message_id}"
+        size = msg.file_size or 0
+        category, ext = classify_file(file_name, msg.mime_type)
+        key_source = f"{normalize(file_name)}|{size}|{ext}"
+        file_key = hashlib.sha256(key_source.encode()).hexdigest()
+        if file_key in existing_keys:
+            continue
+        existing_keys.add(file_key)
+        telegram_ref = f"tg://openmessage?chat_id={msg.dialog_id}&message_id={msg.message_id}"
+        row = IndexedFile(
+            file_key=file_key,
+            dialog_id=msg.dialog_id,
+            message_id=msg.message_id,
+            original_name=file_name,
+            title=derive_title(file_name),
+            category=category,
+            extension=ext,
+            size_bytes=size,
+            mime_type=msg.mime_type,
+            telegram_ref=telegram_ref,
+            indexing_status="indexed",
         )
-    await db.flush()
+        new_files.append(row)
+        new_refs.append(TelegramMediaReference(
+            dialog_id=msg.dialog_id,
+            message_id=msg.message_id,
+            file_name=file_name,
+            size_bytes=size,
+            mime_type=msg.mime_type,
+            telegram_ref=telegram_ref,
+        ))
+    if new_files:
+        db.add_all(new_files)
+        db.add_all(new_refs)
+    await db.commit()
 
     results = await collect_results(db, search)
 
