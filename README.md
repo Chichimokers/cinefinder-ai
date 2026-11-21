@@ -195,12 +195,14 @@ Comandos administrativos (solo propietario, en conversación privada):
 | Comando | Función |
 |---|---|
 | `/autorizar @usuario` | Resuelve el username a Telegram User ID real y lo autoriza |
+| `/autorizar` (respondiendo a su mensaje) | Autoriza por el ID real del remitente; es el método más fiable |
 | `/desautorizar @usuario` | Revoca el acceso inmediatamente |
 | `/autorizados` | Lista usuarios autorizados |
 | `/info @usuario` (o `!infoadmin`) | Estado de autorización de un usuario |
 | `/id` | Muestra tu Telegram User ID |
 
-- El username se resuelve con Telethon (`get_entity`) y se guarda el **ID numérico** como referencia principal; si el usuario cambia de username, se actualiza al volver a autorizarlo.
+- El username se resuelve con Telethon (`get_entity`) y se guarda el **ID numérico** como referencia principal; si el usuario cambia de username, se actualiza al volver a autorizarlo. Escribir un ID numérico a mano **no basta**: se verifica contra MTProto para evitar autorizar identificadores inventados.
+- **Recomendado:** responde al mensaje de la persona con `/autorizar` (sin argumentos). El bot toma el `sender_id` real de Telegram, sin depender de lo que escriba el usuario. Con `/id` respondiendo a un mensaje puedes ver el ID real de esa persona.
 - La validación se ejecuta en **cada mensaje y cada callback**, no solo al iniciar.
 - Los usuarios no autorizados reciben: «⛔ No tienes autorización para utilizar CineFinder AI. Contacta con el administrador.»
 - Las sesiones de búsqueda y los resultados se aíslan por usuario (`pending_files:<user_id>`, `pending_media:<user_id>`): nadie puede consultar o recuperar resultados ajenos.

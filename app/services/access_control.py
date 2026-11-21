@@ -33,26 +33,57 @@ def is_owner_id(user_id: int | None) -> bool:
     return bool(user_id and settings.telegram_owner_id and int(user_id) == int(settings.telegram_owner_id))
 
 
-async def resolve_user(db: AsyncSession, reference: str) -> dict[str, Any]:
-    """Resuelve @username o ID numérico a un Telegram User ID real.
+async def resolve_user(
+    db: AsyncSession, reference: str, replied_user_id: int | None = None
+) -> dict[str, Any]:
+    """Resuelve @username, ID numérico o un mensaje respondido a un User ID real.
 
-    Nunca confía en el username como identificador: usa get_entity y guarda el ID.
+    Nunca se fía de texto arbitrario: todo se verifica contra MTProto.
+    Si el usuario responde a un mensaje ajeno, se usa el sender_id real de Telegram.
     """
+    if replied_user_id:
+        client = get_telegram_client()
+        username, first_name = None, None
+        if client is not None and client.is_connected():
+            try:
+                entity = await client.get_entity(int(replied_user_id))
+                if isinstance(entity, User):
+                    username = getattr(entity, "username", None)
+                    first_name = getattr(entity, "first_name", None)
+            except (RPCError, ValueError, TypeError):
+                pass
+        return {
+            "ok": True,
+            "telegram_id": int(replied_user_id),
+            "username": username,
+            "first_name": first_name,
+            "source": "reply",
+        }
+
     reference = (reference or "").strip()
     if not reference:
-        return {"ok": False, "error": "Debes indicar un @usuario o un ID numérico."}
+        return {"ok": False, "error": "Indica un @usuario, un ID numérico o responde a su mensaje."}
 
     clean = reference.lstrip("@").strip()
 
     if clean.lstrip("-").isdigit():
-        uid = int(clean)
-        result = await db.execute(select(AppUser).where(AppUser.telegram_id == uid))
+        # Un ID escrito a mano NO es prueba de identidad: se verifica en Telegram.
+        client = get_telegram_client()
+        if client is None or not client.is_connected():
+            return {"ok": False, "error": "No se pudo verificar el ID: userbot desconectado."}
+        try:
+            entity = await client.get_entity(int(clean))
+        except (RPCError, ValueError, TypeError):
+            return {"ok": False, "error": f"No existe un usuario de Telegram con ID {clean}."}
+        if not isinstance(entity, User):
+            return {"ok": False, "error": "Ese ID no corresponde a un usuario."}
+        result = await db.execute(select(AppUser).where(AppUser.telegram_id == int(entity.id)))
         row = result.scalar_one_or_none()
         return {
             "ok": True,
-            "telegram_id": uid,
-            "username": row.username if row else None,
-            "first_name": row.first_name if row else None,
+            "telegram_id": int(entity.id),
+            "username": getattr(entity, "username", None) or (row.username if row else None),
+            "first_name": getattr(entity, "first_name", None),
             "source": "id",
         }
 
@@ -108,8 +139,13 @@ async def is_authorized(db: AsyncSession, user_id: int | None) -> bool:
     return (await check_access(db, user_id))["allowed"]
 
 
-async def authorize(db: AsyncSession, reference: str) -> dict[str, Any]:
-    resolved = await resolve_user(db, reference)
+def _label(resolved: dict) -> str:
+    username = resolved.get("username")
+    return f"@{username}" if username else f"ID {resolved['telegram_id']}"
+
+
+async def authorize(db: AsyncSession, reference: str, replied_user_id: int | None = None) -> dict[str, Any]:
+    resolved = await resolve_user(db, reference, replied_user_id)
     if not resolved["ok"]:
         return resolved
     uid = resolved["telegram_id"]
@@ -131,12 +167,12 @@ async def authorize(db: AsyncSession, reference: str) -> dict[str, Any]:
         "ok": True,
         "telegram_id": uid,
         "username": user.username,
-        "message": f"✅ Usuario autorizado: @{user.username or uid} (ID {uid}).",
+        "message": f"✅ Usuario autorizado: {_label(resolved)} (ID {uid}).",
     }
 
 
-async def revoke(db: AsyncSession, reference: str) -> dict[str, Any]:
-    resolved = await resolve_user(db, reference)
+async def revoke(db: AsyncSession, reference: str, replied_user_id: int | None = None) -> dict[str, Any]:
+    resolved = await resolve_user(db, reference, replied_user_id)
     if not resolved["ok"]:
         return resolved
     uid = resolved["telegram_id"]
@@ -149,7 +185,7 @@ async def revoke(db: AsyncSession, reference: str) -> dict[str, Any]:
     user.is_authorized = False
     user.is_banned = True
     await db.flush()
-    return {"ok": True, "message": f"✅ Autorización revocada: @{user.username or uid} (ID {uid})."}
+    return {"ok": True, "message": f"✅ Autorización revocada: {_label(resolved)} (ID {uid})."}
 
 
 async def list_authorized(db: AsyncSession) -> str:
@@ -169,8 +205,8 @@ async def list_authorized(db: AsyncSession) -> str:
     return "\n".join(lines)
 
 
-async def user_info(db: AsyncSession, reference: str) -> str:
-    resolved = await resolve_user(db, reference)
+async def user_info(db: AsyncSession, reference: str, replied_user_id: int | None = None) -> str:
+    resolved = await resolve_user(db, reference, replied_user_id)
     if not resolved["ok"]:
         return resolved["error"]
     uid = resolved["telegram_id"]

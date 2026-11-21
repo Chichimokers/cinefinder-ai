@@ -37,7 +37,6 @@ logger = get_logger(__name__)
 
 COMMANDS = (
     "!busca", "!info", "!stats", "!ultimas", "!ayuda", "!estado",
-    "!autorizar", "!desautorizar", "!autorizados", "!id",
     "!enviar", "!archivos", "!infoarchivo", "!enviararchivo", "!cancelar",
 )
 ADMIN_COMMANDS = {
@@ -53,11 +52,11 @@ HELP = """🤖 CineFinder AI — Comandos
 !stats — estadísticas del catálogo
 !ultimas — últimas incorporationes
 !estado — estado del sistema
-/autorizar @usuario — autoriza a un usuario (solo propietario)
-/desautorizar @usuario — revoca la autorización (solo propietario)
-/autorizados — lista de usuarios autorizados (solo propietario)
-/info @usuario — información de autorización (solo propietario; también !infoadmin)
-/id — muestra tu Telegram User ID
+/autorizar @usuario — autoriza a un usuario (o responde a su mensaje)
+/desautorizar @usuario — revoca la autorización (o responde a su mensaje)
+/autorizados — lista de usuarios autorizados
+/info @usuario — información de autorización (!infoadmin)
+/id — muestra tu ID (responde a un mensaje para ver el de otro)
 !enviar <n> — envía el archivo de Telegram elegido (solo fuentes autorizadas)
 !archivos [texto] — búsqueda profunda en TODO tu historial de Telegram (admitime imagen)
 !infoarchivo <n> — detalles de un resultado de búsqueda profunda
@@ -82,19 +81,41 @@ async def handle_admin_command(message: Message, command: str, argument: str) ->
     if not is_owner_id(sender_id):
         await answer(message, "⛔ Este comando es exclusivo del propietario.")
         return True
+
+    replied_id = None
+    reply_msg = getattr(message, "reply_to_message", None)
+    if reply_msg is not None:
+        replied_id = getattr(reply_msg, "sender_id", None)
+
     async with get_sessionmaker()() as db:
         if command in {"/autorizar", "!autorizar"}:
-            result = await authorize(db, argument)
+            if replied_id and replied_id != sender_id:
+                result = await authorize(db, argument, replied_user_id=replied_id)
+            else:
+                result = await authorize(db, argument)
             await answer(message, result.get("message") or result.get("error", "Error"))
         elif command in {"/desautorizar", "!desautorizar"}:
-            result = await revoke(db, argument)
+            if replied_id and replied_id != sender_id:
+                result = await revoke(db, argument, replied_user_id=replied_id)
+            else:
+                result = await revoke(db, argument)
             await answer(message, result.get("message") or result.get("error", "Error"))
         elif command in {"/autorizados", "!autorizados"}:
             await answer(message, await list_authorized(db))
         elif command in {"/info", "!infoadmin"}:
-            await answer(message, await user_info(db, argument))
+            if replied_id and replied_id != sender_id:
+                await answer(message, await user_info(db, argument, replied_user_id=replied_id))
+            else:
+                await answer(message, await user_info(db, argument))
         elif command in {"/id", "!id"}:
-            await answer(message, f"🆔 Tu Telegram User ID: {sender_id}")
+            if replied_id and replied_id != sender_id:
+                from app.services.access_control import user_info
+
+                await answer(message, await user_info(db, "", replied_user_id=replied_id))
+            else:
+                await answer(message, f"🆔 Tu Telegram User ID: {sender_id}")
+        # Persistir cambios: get_sessionmaker() NO hace commit automático.
+        await db.commit()
     return True
 
 
@@ -274,33 +295,6 @@ async def handle_estado(message: Message) -> None:
     )
 
 
-async def set_user_authorization(message: Message, argument: str, authorized: bool) -> None:
-    if message.sender_id != settings.telegram_owner_id:
-        await answer(message, "⛔ Solo el propietario puede autorizar usuarios.")
-        return
-    parts = argument.split()
-    if not parts or not parts[0].lstrip("-").isdigit():
-        await answer(message, "Uso: !autorizar <ID_numérico> [usuario]")
-        return
-    telegram_id = int(parts[0])
-    username = parts[1] if len(parts) > 1 else None
-    async with get_sessionmaker()() as db:
-        result = await db.execute(
-            select(AppUser).where(AppUser.telegram_id == telegram_id)
-        )
-        user = result.scalar_one_or_none()
-        if user is None:
-            user = AppUser(telegram_id=telegram_id, username=username)
-            db.add(user)
-        if username:
-            user.username = username
-        user.is_authorized = authorized
-        user.is_owner = False
-        await db.flush()
-    action = "autorizado" if authorized else "desautorizado"
-    await answer(message, f"✅ Usuario {telegram_id} {action}.")
-
-
 def _telegram_link(chat_id: int, message_id: int) -> str:
     raw = str(abs(chat_id))
     if chat_id < 0 and raw.startswith("100"):
@@ -343,7 +337,7 @@ async def offer_telegram_media(
             db.add(SystemSetting(key=key, value=value))
         else:
             setting.value = value
-        await db.flush()
+        await db.commit()
 
     try:
         if status_message_id:
@@ -379,7 +373,7 @@ async def deliver_selected_media(chat_id: int, sender_id: int, job_id: str | Non
             return
         item = media[index]
         await db.delete(setting)
-        await db.flush()
+        await db.commit()
 
         source_result = await db.execute(
             select(AuthorizedSource).where(
@@ -644,10 +638,6 @@ def register_handlers(client: Any) -> None:
             await answer(message, HELP)
         elif command == "!estado":
             await handle_estado(message)
-        elif command == "!autorizar":
-            await set_user_authorization(message, argument, True)
-        elif command == "!desautorizar":
-            await set_user_authorization(message, argument, False)
         elif command == "!enviar":
             parts = argument.split()
             if not parts or not parts[0].isdigit():

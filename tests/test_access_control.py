@@ -34,3 +34,15 @@ def test_username_validation():
 
     result = asyncio.run(run())
     assert result["ok"] is False
+
+
+def test_numeric_id_without_telegram_is_not_trusted():
+    """Un ID escrito a mano no debe autorizarse sin verificación MTProto."""
+    from app.services.access_control import resolve_user
+
+    async def run():
+        return await resolve_user(None, "999999999")
+
+    result = asyncio.run(run())
+    assert result["ok"] is False
+    assert "verificar" in result["error"].lower() or "userbot" in result["error"].lower()
