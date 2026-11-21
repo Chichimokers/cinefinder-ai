@@ -27,6 +27,8 @@ from app.utils.logging import get_logger
 logger = get_logger(__name__)
 
 _client: TelegramClient | None = None
+# Un único cliente para escucha + RPC: dos clientes con la misma StringSession
+# provocan AuthKeyDuplicatedError incluso desde la misma IP en algunos casos.
 _listener: TelegramClient | None = None
 _auth_failed = False
 _reconnect_attempts = 0
@@ -56,13 +58,8 @@ def get_telegram_client() -> TelegramClient | None:
 
 
 def get_listener_client() -> TelegramClient | None:
-    """Cliente dedicado al bucle de escucha de eventos."""
-    global _listener
-    if _auth_failed:
-        return None
-    if _listener is None:
-        _listener = _make_client()
-    return _listener
+    """El listener usa el MISMO cliente único (evita duplicar la sesión)."""
+    return get_telegram_client()
 
 
 async def _authorize(client: TelegramClient) -> tuple[bool, str]:
@@ -116,9 +113,8 @@ async def connect_listener() -> tuple[bool, str]:
 
 async def disconnect_telegram() -> None:
     global _client, _listener
-    for client in (_client, _listener):
-        if client and client.is_connected():
-            await client.disconnect()
+    if _client and _client.is_connected():
+        await _client.disconnect()
     _client = None
     _listener = None
 

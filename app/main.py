@@ -71,21 +71,17 @@ async def lifespan(app: FastAPI):
 
     async def _telegram_supervisor() -> None:
         """Mantiene el worker de escucha vivo; lo reinicia si se cae."""
-        from app.telegram.client import connect_listener, connect_telegram, disconnect_telegram, get_listener_client
+        from app.telegram.client import connect_telegram, disconnect_telegram, get_telegram_client
         from app.workers.telegram_worker import register_handlers
-
-        # El cliente RPC también debe estar conectado para enviar mensajes/archivos.
-        rpc_ok, rpc_detail = await connect_telegram()
-        logger.info("telegram_rpc_ready", extra={"ok": rpc_ok})
 
         while not listener_stop.is_set():
             try:
-                ok, detail = await connect_listener()
+                ok, detail = await connect_telegram()
                 if not ok:
                     logger.warning("telegram_listener_not_ready", extra={"detail": detail})
                     await asyncio.sleep(10)
                     continue
-                client = get_listener_client()
+                client = get_telegram_client()
                 if client is None:
                     await asyncio.sleep(10)
                     continue
@@ -100,11 +96,10 @@ async def lifespan(app: FastAPI):
                 if isinstance(exc, AuthKeyDuplicatedError):
                     logger.warning("telegram_session_conflict_reconnecting")
                     # La sesión fue invalidada por uso simultáneo desde otra IP.
-                    # Se reintroduce el StringSession original y se reinicia.
                     from app.telegram import client as tg_client
 
-                    tg_client._listener = None
                     tg_client._client = None
+                    tg_client._listener = None
                     tg_client._auth_failed = False
                     await asyncio.sleep(10)
                 logger.warning("telegram_worker_crashed", extra={"error": type(exc).__name__})

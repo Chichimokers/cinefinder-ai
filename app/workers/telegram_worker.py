@@ -29,7 +29,7 @@ from app.services.jobs import create_job
 from app.services.telegram_deep_search import create_file_search
 from app.workers.deep_search_worker import run_deep_search_job
 from app.services.research import run_search_job
-from app.telegram.client import connect_listener, get_listener_client, get_telegram_client
+from app.telegram.client import connect_telegram, get_telegram_client
 from app.utils.logging import get_logger
 from app.utils.security import hash_image
 
@@ -785,12 +785,12 @@ def register_handlers(client: Any) -> None:
 async def run_telegram_worker() -> None:
     """Arranca el bucle de escucha con su propio cliente y reconexión."""
     while True:
-        ok, detail = await connect_listener()
+        ok, detail = await connect_telegram()
         if not ok:
             logger.warning("telegram_worker_not_connected", extra={"detail": detail})
             await asyncio.sleep(15)
             continue
-        client = get_listener_client()
+        client = get_telegram_client()
         assert client is not None
         register_handlers(client)
         try:
