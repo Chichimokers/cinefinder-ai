@@ -11,6 +11,7 @@ Uso: py -3.12 scripts/authenticate_telegram.py
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import getpass
 import sys
@@ -35,6 +36,13 @@ def _hidden_input(prompt: str) -> str:
 
 
 async def main() -> int:
+    parser = argparse.ArgumentParser(description="Autenticación local del userbot de Telegram")
+    parser.add_argument(
+        "--force-sms", action="store_true",
+        help="Fuerza el envío del código por SMS en lugar de la app de Telegram",
+    )
+    args = parser.parse_args()
+
     if not (settings.telegram_api_id and settings.telegram_api_hash):
         print("Faltan TELEGRAM_API_ID o TELEGRAM_API_HASH.")
         return 1
@@ -53,8 +61,17 @@ async def main() -> int:
                 return 1
             return 0
 
-        await client.send_code_request(phone)
-        code = _hidden_input("Código OTP recibido en Telegram (oculto): ")
+        await client.send_code_request(phone, force_sms=args.force_sms)
+        print("Código solicitado. Si no llegó por SMS, BUSCA en la app de Telegram:")
+        print("  • el chat de servicio «Telegram» (mensaje de inicio de sesión)")
+        print("  • Mensajes Guardados / notificaciones de la cuenta +5358126024")
+        print("  • espera 1-2 minutos; si solicitaste varios códigos, solo sirve el último.")
+        code = _hidden_input("Código OTP recibido en Telegram (oculto; Enter para reenviar): ")
+        if not code:
+            # Reenviar forzando SMS para el caso de que la app no muestre el código.
+            await client.send_code_request(phone, force_sms=True)
+            print("Código reenviado por SMS. Introdúcelo ahora.")
+            code = _hidden_input("Código OTP (oculto): ")
         try:
             await client.sign_in(phone=phone, code=code)
         except SessionPasswordNeededError:
