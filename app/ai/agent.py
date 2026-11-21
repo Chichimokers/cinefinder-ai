@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -73,6 +74,7 @@ class AgentResult:
     steps: int = 0
     error: str | None = None
     trace: list[dict] = field(default_factory=list)
+    tool_results: dict[str, list[dict]] = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
@@ -84,6 +86,7 @@ class AgentResult:
             "steps": self.steps,
             "error": self.error,
             "trace": self.trace,
+            "tool_results": self.tool_results,
         }
 
 
@@ -250,6 +253,7 @@ async def run_agent(
     tools_called: list[str] = []
     candidates: list[dict] = []
     trace: list[dict] = []
+    tool_results: dict[str, list[dict]] = defaultdict(list)
     steps = 0
     answer = ""
     analysis_text = ""
@@ -298,6 +302,8 @@ async def run_agent(
                     ok = bool(payload.get("ok"))
                     duration = payload.get("duration_ms", 0)
                     error = payload.get("error")
+                    if ok and isinstance(payload.get("data"), dict):
+                        tool_results[name].append(payload["data"])
                     await _record_task(
                         db, ctx.job_id, step, name, args, payload,
                         "ok" if ok else "error", duration, error,
@@ -351,6 +357,8 @@ async def run_agent(
                 payloads = await _execute_tools(fallback_calls, ctx)
                 for name, payload in zip(missing, payloads):
                     status = "ok" if payload.get("ok") else "error"
+                    if status == "ok" and isinstance(payload.get("data"), dict):
+                        tool_results[name].append(payload["data"])
                     await _record_task(
                         db, ctx.job_id, steps + 1, name,
                         _fallback_args(name, ctx, query, candidates, analysis_text),
@@ -376,6 +384,7 @@ async def run_agent(
                 answer=answer or json.dumps({"need_review": True, "reason": "Sin respuesta final"}),
                 tools_called=tools_called, candidates=candidates,
                 usage=client.usage.as_dict(), steps=steps, trace=trace,
+                tool_results=dict(tool_results),
             )
     except TimeoutError:
         await _record_usage(db, ctx.job_id, client.usage.as_dict(), settings.nvidia_model)
@@ -383,6 +392,7 @@ async def run_agent(
             answer=json.dumps({"need_review": True, "reason": "Timeout del agente", "trace": trace}),
             status="timeout", tools_called=tools_called, candidates=candidates,
             usage=client.usage.as_dict(), steps=steps, error="Timeout", trace=trace,
+            tool_results=dict(tool_results),
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("agent_error", extra={"error": type(exc).__name__})
@@ -390,4 +400,5 @@ async def run_agent(
             answer=json.dumps({"need_review": True, "reason": "Error interno del agente"}),
             status="failed", tools_called=tools_called, candidates=candidates,
             usage=client.usage.as_dict(), steps=steps, error=type(exc).__name__, trace=trace,
+            tool_results=dict(tool_results),
         )

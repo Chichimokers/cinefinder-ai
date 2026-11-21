@@ -115,6 +115,7 @@ py -3.12 scripts\export_session.py
 | `!ultimas` | Últimas incorporaciones |
 | `!autorizar <ID> [usuario]` | Autoriza a otro usuario (solo propietario) |
 | `!desautorizar <ID>` | Revoca la autorización (solo propietario) |
+| `!enviar <n>` | Entrega el archivo elegido de Telegram (solo fuentes autorizadas) |
 | `!ayuda` | Ayuda |
 | `!estado` | Estado de servicios |
 
@@ -125,6 +126,14 @@ Durante `!busca` el bot muestra en vivo su razonamiento, cada herramienta ejecut
 Cuando el propietario lo pide —o hay poca evidencia en el resto de fuentes— el agente ejecuta `search_telegram_all_channels`: recorre **todos los chats y canales accesibles al userbot**, busca el texto y devuelve coincidencias con chat, mensaje, fecha y fragmento. Es una búsqueda **bajo demanda**, sin indexación persistente ni redistribución de contenido de terceros, con límites estrictos (120 diálogos, 20 mensajes por diálogo, 100 resultados). Para forzarla, incluye en la petición algo como: «busca también en todos mis canales de Telegram».
 
 Por API, envía la cabecera `X-Requester-ID` con tu `TELEGRAM_OWNER_ID` para habilitar las herramientas de propietario.
+
+Si la búsqueda encuentra mensajes con archivos, el bot lista hasta 5 opciones con botones (o responde `!enviar 1`, `!enviar 2`, …). **El archivo solo se entrega si el chat está registrado como fuente autorizada**; si no lo está, se devuelve el enlace al mensaje original y se explica el motivo. Para autorizar un canal:
+
+```powershell
+py -3.12 scripts\authorize_source.py -1001234567890 --name "Mi canal"
+```
+
+Esto evita la distribución automática de copias no autorizadas de contenido comercial.
 
 Solo responde al propietario (`TELEGRAM_OWNER_ID`) y a usuarios autorizados. Deduplica eventos y agrupa álbumes por `grouped_id`.
 

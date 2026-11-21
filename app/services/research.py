@@ -112,6 +112,33 @@ def format_professional_answer(
     return "\n".join(lines)
 
 
+def extract_telegram_media(agent: AgentResult) -> list[dict]:
+    """Extrae mensajes con archivos de Telegram para ofrecerlos al propietario."""
+    found: list[dict] = []
+    seen: set[tuple[int, int]] = set()
+    for name in ("search_telegram_all_channels", "search_telegram_authorized"):
+        for payload in agent.tool_results.get(name, []):
+            for item in payload.get("results", []):
+                chat_id = item.get("chat_id")
+                message_id = item.get("message_id")
+                if not item.get("has_media") or not chat_id or not message_id:
+                    continue
+                key = (int(chat_id), int(message_id))
+                if key in seen:
+                    continue
+                seen.add(key)
+                found.append({
+                    "chat": item.get("chat"),
+                    "chat_id": int(chat_id),
+                    "message_id": int(message_id),
+                    "date": item.get("date"),
+                    "text": (item.get("text") or "")[:300],
+                })
+                if len(found) >= 8:
+                    return found
+    return found
+
+
 async def run_search_job(
     db: AsyncSession,
     job_id: str,
@@ -214,6 +241,7 @@ async def run_search_job(
         len(agent.candidates), requester_id, job_id,
     )
     formatted = format_professional_answer(parsed, saved, confidence, publication, agent)
+    telegram_media = extract_telegram_media(agent)
     result = {
         "job_id": job_id,
         "status": "completed",
@@ -226,6 +254,7 @@ async def run_search_job(
         "answer": parsed,
         "formatted_answer": formatted,
         "trace": agent.trace,
+        "telegram_media": telegram_media,
         "usage": agent.usage,
     }
     await set_status(

@@ -8,12 +8,12 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from telethon import events
+from telethon import Button, events
 from telethon.tl.types import Message
 
 from app.catalog.service import get_movie_by_code, search_catalog
 from app.config import settings
-from app.database.models import AppUser, TelegramMessage
+from app.database.models import AppUser, AuthorizedSource, SystemSetting, TelegramMessage
 from app.database.session import get_sessionmaker
 from app.services.jobs import create_job
 from app.services.research import run_search_job
@@ -23,7 +23,11 @@ from app.utils.security import hash_image
 
 logger = get_logger(__name__)
 
-COMMANDS = ("!busca", "!info", "!stats", "!ultimas", "!ayuda", "!estado", "!autorizar", "!desautorizar")
+COMMANDS = (
+    "!busca", "!info", "!stats", "!ultimas", "!ayuda", "!estado",
+    "!autorizar", "!desautorizar", "!enviar",
+)
+MAX_MEDIA_OFFERS = 5
 ALBUM_DEBOUNCE_SECONDS = 1.5
 
 HELP = """🤖 CineFinder AI — Comandos
@@ -34,6 +38,7 @@ HELP = """🤖 CineFinder AI — Comandos
 !estado — estado del sistema
 !autorizar <ID> [usuario] — autoriza a otro usuario (solo propietario)
 !desautorizar <ID> — revoca la autorización (solo propietario)
+!enviar <n> — envía el archivo de Telegram elegido (solo fuentes autorizadas)
 !ayuda — este mensaje
 """
 
@@ -137,6 +142,8 @@ async def handle_busca(message: Message, query: str, images: list[bytes]) -> Non
             progress=progress,
         )
     await answer(message, result.get("formatted_answer") or "⚠️ Sin respuesta del agente.")
+    if result.get("telegram_media") and message.sender_id == settings.telegram_owner_id:
+        await offer_telegram_media(message, job.id, result["telegram_media"])
 
 
 async def handle_info(message: Message, code: str) -> None:
@@ -215,6 +222,123 @@ async def set_user_authorization(message: Message, argument: str, authorized: bo
     await answer(message, f"✅ Usuario {telegram_id} {action}.")
 
 
+def _telegram_link(chat_id: int, message_id: int) -> str:
+    raw = str(abs(chat_id))
+    if chat_id < 0 and raw.startswith("100"):
+        return f"https://t.me/c/{raw[3:]}/{message_id}"
+    return f"tg://openmessage?chat_id={chat_id}&message_id={message_id}"
+
+
+async def _pending_key(chat_id: int) -> str:
+    return f"pending_media:{chat_id}"
+
+
+async def offer_telegram_media(message: Message, job_id: str, media: list[dict]) -> None:
+    """Pregunta al propietario cuál de los archivos encontrados desea recibir."""
+    if not media:
+        return
+    client = get_telegram_client()
+    if client is None or not client.is_connected():
+        return
+    offers = media[:MAX_MEDIA_OFFERS]
+    lines = ["📎 *Archivos encontrados en tus canales de Telegram*",
+             "¿Cuál quieres que te envíe? (responde con el número o pulsa el botón)"]
+    for index, item in enumerate(offers, start=1):
+        text = (item.get("text") or "").replace("\n", " ")[:90] or "sin descripción"
+        lines.append(f"{index}. {item.get('chat', 'chat')} — {text}")
+    buttons = [Button.inline(str(i), data=f"cfmedia:{job_id}:{i - 1}".encode())
+               for i in range(1, len(offers) + 1)]
+    rows = [buttons[i:i + 4] for i in range(0, len(buttons), 4)]
+    rows.append([Button.inline("Cancelar", data=b"cfmedia:cancel")])
+
+    async with get_sessionmaker()() as db:
+        key = await _pending_key(message.chat_id)
+        result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
+        setting = result.scalar_one_or_none()
+        value = {"job_id": job_id, "media": offers}
+        if setting is None:
+            db.add(SystemSetting(key=key, value=value))
+        else:
+            setting.value = value
+        await db.flush()
+
+    await client.send_message(message.chat_id, "\n".join(lines), buttons=rows)
+
+
+async def deliver_selected_media(chat_id: int, sender_id: int, job_id: str | None, index: int) -> None:
+    """Entrega el archivo elegido solo si la fuente está autorizada."""
+    if sender_id != settings.telegram_owner_id:
+        await answer_safe(chat_id, "⛔ Solo el propietario puede solicitar archivos.")
+        return
+
+    async with get_sessionmaker()() as db:
+        key = await _pending_key(chat_id)
+        result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
+        setting = result.scalar_one_or_none()
+        if setting is None or not setting.value:
+            await answer_safe(chat_id, "No hay una selección pendiente. Haz otra búsqueda primero.")
+            return
+        value = setting.value
+        if job_id and value.get("job_id") != job_id:
+            await answer_safe(chat_id, "La selección corresponde a otra búsqueda.")
+            return
+        media = value.get("media") or []
+        if index < 0 or index >= len(media):
+            await answer_safe(chat_id, "Número de opción no válido.")
+            return
+        item = media[index]
+        await db.delete(setting)
+        await db.flush()
+
+        source_result = await db.execute(
+            select(AuthorizedSource).where(
+                AuthorizedSource.source_type == "telegram",
+                AuthorizedSource.authorized.is_(True),
+                AuthorizedSource.url.contains(str(item["chat_id"])),
+            )
+        )
+        source = source_result.scalar_one_or_none()
+
+    link = _telegram_link(item["chat_id"], item["message_id"])
+    if source is None:
+        await answer_safe(
+            chat_id,
+            "⚠️ Ese chat no está registrado como fuente autorizada para entrega automática.\n"
+            f"Te dejo el enlace al mensaje original: {link}\n"
+            "Para autorizarlo: py -3.12 scripts\\authorize_source.py "
+            f"{item['chat_id']} --name \"{item.get('chat', 'canal')}\"",
+        )
+        return
+
+    client = get_telegram_client()
+    if client is None or not client.is_connected():
+        await answer_safe(chat_id, "Userbot no conectado.")
+        return
+    try:
+        messages = await client.get_messages(item["chat_id"], ids=[item["message_id"]])
+        if not messages or not messages[0].media:
+            await answer_safe(chat_id, "El mensaje ya no contiene archivos.")
+            return
+        data = await messages[0].download_media(file=bytes)
+        if not isinstance(data, bytes):
+            await answer_safe(chat_id, "No se pudo descargar el archivo.")
+            return
+        import hashlib
+
+        digest = hashlib.sha256(data).hexdigest()
+        caption = f"📦 Archivo autorizado · fuente: {source.name}\nSHA-256: {digest}"
+        await client.send_file(chat_id, data, caption=caption)
+        await answer_safe(chat_id, f"✅ Enviado. Origen: {link}")
+    except Exception as exc:  # noqa: BLE001
+        await answer_safe(chat_id, f"No se pudo entregar: {type(exc).__name__}. Enlace: {link}")
+
+
+async def answer_safe(chat_id: int, text: str) -> None:
+    client = get_telegram_client()
+    if client and client.is_connected():
+        await client.send_message(chat_id, text)
+
+
 async def process_group(images: list[bytes], texts: list[str], message: Message) -> None:
     query = " ".join(t for t in texts if t and not t.startswith("!")).strip()
     await handle_busca(message, query, images)
@@ -287,6 +411,34 @@ def register_handlers(client: Any) -> None:
             await set_user_authorization(message, argument, True)
         elif command == "!desautorizar":
             await set_user_authorization(message, argument, False)
+        elif command == "!enviar":
+            parts = argument.split()
+            if not parts or not parts[0].isdigit():
+                await answer(message, "Uso: !enviar <número de opción>")
+            else:
+                await deliver_selected_media(
+                    message.chat_id, sender_id or 0, None, int(parts[0]) - 1
+                )
+
+    @client.on(events.CallbackQuery(pattern=rb"^cfmedia:"))
+    async def media_callback(event: events.CallbackQuery.Event) -> None:
+        data = event.data.decode("utf-8", "replace")
+        parts = data.split(":")
+        target_chat = getattr(event, "chat_id", None) or event.sender_id
+        await event.answer()
+        if len(parts) >= 2 and parts[1] == "cancel":
+            async with get_sessionmaker()() as db:
+                key = await _pending_key(target_chat)
+                result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
+                setting = result.scalar_one_or_none()
+                if setting:
+                    await db.delete(setting)
+            await answer_safe(target_chat, "Selección cancelada.")
+            return
+        if len(parts) != 3 or not parts[2].isdigit():
+            await answer_safe(target_chat, "Selección no válida.")
+            return
+        await deliver_selected_media(target_chat, event.sender_id, parts[1], int(parts[2]))
 
 
 async def run_telegram_worker() -> None:
