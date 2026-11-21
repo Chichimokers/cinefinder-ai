@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from sqlalchemy import select
 
 from app.ai.tools.base import Tool, ToolContext, registry
-from app.database.models import AppUser, AuthorizedSource
+from app.database.models import AppUser, AuthorizedSource, FileSearch, FileSearchResult
+from app.search.image_similarity import dhash
+from app.services.telegram_deep_search import create_file_search
 from app.telegram.client import get_telegram_client
+from app.workers.deep_search_worker import run_deep_search_job
 
 MAX_MESSAGES_PER_CHAT = 50
 # Límites estrictos para la búsqueda global en los diálogos del userbot.
@@ -132,6 +137,64 @@ async def search_telegram_all_channels(ctx: ToolContext) -> dict:
     }
 
 
+async def search_telegram_files_deep(ctx: ToolContext) -> dict:
+    """Encola una búsqueda profunda y reanudable en el historial de Telegram."""
+    query = (ctx.extra.get("query") or ctx.query or "").strip()
+    if not query and not ctx.images:
+        return {"error": "Se requiere texto o una imagen"}
+    image_features = None
+    if ctx.images:
+        try:
+            image_features = {"dhash": dhash(ctx.images[0])}
+        except Exception:  # noqa: BLE001
+            image_features = None
+    search = await create_file_search(
+        ctx.db,
+        query=query or "imagen enviada",
+        requester_id=ctx.requester_id,
+        image_hash=None,
+        image_features=image_features,
+        aliases=ctx.extra.get("aliases"),
+        year=ctx.extra.get("year"),
+    )
+    search.scope = {"chat_id": ctx.requester_id, "origin": ctx.extra.get("origin", "agent")}
+    await ctx.db.flush()
+    await ctx.db.commit()
+    asyncio.create_task(run_deep_search_job(search.id))
+    return {
+        "queued": True,
+        "search_id": search.id,
+        "message": "Búsqueda profunda iniciada; recibirás los resultados cuando terminen.",
+        "variants": search.query_variants,
+    }
+
+
+async def get_deep_search_status(ctx: ToolContext) -> dict:
+    search_id = ctx.extra.get("search_id")
+    if not search_id:
+        return {"error": "Falta search_id"}
+    result = await ctx.db.execute(select(FileSearch).where(FileSearch.id == search_id))
+    search = result.scalar_one_or_none()
+    if search is None:
+        return {"error": "Búsqueda no encontrada"}
+    results = await ctx.db.execute(
+        select(FileSearchResult).where(FileSearchResult.search_id == search_id).order_by(FileSearchResult.score.desc()).limit(20)
+    )
+    return {
+        "search_id": search.id,
+        "status": search.status,
+        "stage": search.stage,
+        "dialogs_done": search.dialogs_done,
+        "dialogs_total": search.dialogs_total,
+        "messages_scanned": search.messages_scanned,
+        "files_found": search.files_found,
+        "results": [
+            {"score": r.score, "indexed_file_id": r.indexed_file_id, "matched": r.matched_text}
+            for r in results.scalars().all()
+        ],
+    }
+
+
 def register() -> None:
     registry.register(Tool(
         name="search_telegram_all_channels",
@@ -156,5 +219,34 @@ def register() -> None:
             "required": ["query"],
         },
         handler=search_telegram_authorized,
+        permission="user",
+    ))
+    registry.register(Tool(
+        name="search_telegram_files_deep",
+        description=(
+            "Inicia una búsqueda profunda en todo el historial accesible de Telegram: "
+            "chats, grupos, canales, archivados, documentos y multimedia. Reanudable."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "aliases": {"type": "array", "items": {"type": "string"}},
+                "year": {"type": "integer"},
+            },
+            "required": [],
+        },
+        handler=search_telegram_files_deep,
+        permission="user",
+    ))
+    registry.register(Tool(
+        name="get_deep_search_status",
+        description="Consulta el progreso y resultados de una búsqueda profunda.",
+        parameters={
+            "type": "object",
+            "properties": {"search_id": {"type": "string"}},
+            "required": ["search_id"],
+        },
+        handler=get_deep_search_status,
         permission="user",
     ))

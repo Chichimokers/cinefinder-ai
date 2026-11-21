@@ -53,6 +53,18 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # noqa: BLE001
         logger.warning("startup_check_failed", extra={"error": type(exc).__name__})
 
+    async def _deep_search_loop() -> None:
+        from app.workers.deep_search_worker import process_pending_deep_searches
+
+        while True:
+            try:
+                await process_pending_deep_searches()
+            except Exception:  # noqa: BLE001
+                pass
+            await asyncio.sleep(10)
+
+    deep_search_task = asyncio.create_task(_deep_search_loop())
+
     # Userbot opcional dentro del mismo proceso (ENABLE_TELEGRAM_WORKER=true).
     telegram_task: asyncio.Task | None = None
     if os.environ.get("ENABLE_TELEGRAM_WORKER", "").lower() in {"1", "true", "yes"}:
@@ -73,6 +85,9 @@ async def lifespan(app: FastAPI):
             logger.warning("telegram_worker_start_failed", extra={"error": type(exc).__name__})
 
     yield
+
+    deep_search_task.cancel()
+    await asyncio.gather(deep_search_task, return_exceptions=True)
 
     if telegram_task is not None:
         telegram_task.cancel()

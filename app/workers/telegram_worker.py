@@ -13,9 +13,12 @@ from telethon.tl.types import Message
 
 from app.catalog.service import get_movie_by_code, search_catalog
 from app.config import settings
-from app.database.models import AppUser, AuthorizedSource, SystemSetting, TelegramMessage
+from app.database.models import AppUser, AuthorizedSource, FileSearch, SystemSetting, TelegramMessage
 from app.database.session import get_sessionmaker
+from app.search.image_similarity import dhash
 from app.services.jobs import create_job
+from app.services.telegram_deep_search import create_file_search
+from app.workers.deep_search_worker import run_deep_search_job
 from app.services.research import run_search_job
 from app.telegram.client import connect_telegram, get_telegram_client
 from app.utils.logging import get_logger
@@ -26,6 +29,7 @@ logger = get_logger(__name__)
 COMMANDS = (
     "!busca", "!info", "!stats", "!ultimas", "!ayuda", "!estado",
     "!autorizar", "!desautorizar", "!enviar",
+    "!archivos", "!infoarchivo", "!enviararchivo", "!cancelar",
 )
 MAX_MEDIA_OFFERS = 5
 ALBUM_DEBOUNCE_SECONDS = 1.5
@@ -39,6 +43,10 @@ HELP = """🤖 CineFinder AI — Comandos
 !autorizar <ID> [usuario] — autoriza a otro usuario (solo propietario)
 !desautorizar <ID> — revoca la autorización (solo propietario)
 !enviar <n> — envía el archivo de Telegram elegido (solo fuentes autorizadas)
+!archivos [texto] — búsqueda profunda en TODO tu historial de Telegram (admitime imagen)
+!infoarchivo <n> — detalles de un resultado de búsqueda profunda
+!enviararchivo <n> — solicita un archivo de la búsqueda profunda
+!cancelar — cancela la búsqueda profunda en curso
 !ayuda — este mensaje
 """
 
@@ -339,6 +347,123 @@ async def answer_safe(chat_id: int, text: str) -> None:
         await client.send_message(chat_id, text)
 
 
+async def start_deep_search(message: Message, query: str, images: list[bytes]) -> None:
+    if message.sender_id != settings.telegram_owner_id:
+        await answer(message, "⛔ Solo el propietario puede iniciar búsquedas profundas.")
+        return
+    features = None
+    if images:
+        try:
+            features = {"dhash": dhash(images[0])}
+        except Exception:  # noqa: BLE001
+            features = None
+    await answer(message, "🔎 Descubriendo conversaciones e inspeccionando historiales…")
+    async with get_sessionmaker()() as db:
+        search = await create_file_search(
+            db,
+            query=query or "imagen enviada",
+            requester_id=str(message.chat_id),
+            image_features=features,
+        )
+        search.scope = {"chat_id": message.chat_id, "origin": "telegram"}
+        await db.commit()
+        search_id = search.id
+    asyncio.create_task(run_deep_search_job(search_id))
+    await answer(message, f"✅ Búsqueda profunda encolada (`{search_id}`). Te avisaré al terminar.")
+
+
+async def _get_pending_files(chat_id: int) -> tuple[str, list[dict]]:
+    async with get_sessionmaker()() as db:
+        result = await db.execute(
+            select(SystemSetting).where(SystemSetting.key == f"pending_files:{chat_id}")
+        )
+        setting = result.scalar_one_or_none()
+        if not setting or not setting.value:
+            return "", []
+        return str(setting.value.get("search_id", "")), list(setting.value.get("results", []))
+
+
+async def show_file_info(message: Message, argument: str) -> None:
+    _, results = await _get_pending_files(message.chat_id)
+    if not results or not argument.isdigit():
+        await answer(message, "No hay resultados recientes. Usa !archivos primero.")
+        return
+    item = results[int(argument) - 1]
+    size = (item.get("size_bytes") or 0) / 1024 / 1024
+    await answer(
+        message,
+        f"📄 *{item.get('name') or item.get('title')}*\n"
+        f"Tamaño: {size:.1f} MB\nCategoría: {item.get('category')}\n"
+        f"Extensión: {item.get('extension')}\nOrigen: chat {item.get('dialog_id')} · mensaje {item.get('message_id')}\n"
+        f"Coincidencia: {item.get('score', 0):.0f}%\nReferencia: {item.get('telegram_ref')}",
+    )
+
+
+async def deliver_indexed_file(message: Message, argument: str) -> None:
+    if message.sender_id != settings.telegram_owner_id:
+        await answer(message, "⛔ Solo el propietario puede recibir archivos.")
+        return
+    _, results = await _get_pending_files(message.chat_id)
+    if not results or not argument.isdigit():
+        await answer(message, "No hay resultados recientes. Usa !archivos primero.")
+        return
+    index = int(argument) - 1
+    if index < 0 or index >= len(results):
+        await answer(message, "Número no válido.")
+        return
+    item = results[index]
+    dialog_id, message_id = int(item["dialog_id"]), int(item["message_id"])
+
+    async with get_sessionmaker()() as db:
+        source_result = await db.execute(
+            select(AuthorizedSource).where(
+                AuthorizedSource.source_type == "telegram",
+                AuthorizedSource.authorized.is_(True),
+                AuthorizedSource.url.contains(str(dialog_id)),
+            )
+        )
+        source = source_result.scalar_one_or_none()
+
+    link = f"tg://openmessage?chat_id={dialog_id}&message_id={message_id}"
+    if source is None:
+        await answer(
+            message,
+            "⚠️ Ese chat no está autorizado para entrega automática. "
+            f"Enlace al original: {link}\n"
+            f"Autorízalo con: py -3.12 scripts\\authorize_source.py {dialog_id}",
+        )
+        return
+
+    client = get_telegram_client()
+    if client is None or not client.is_connected():
+        await answer(message, "Userbot no conectado.")
+        return
+    try:
+        messages = await client.get_messages(dialog_id, ids=[message_id])
+        if not messages or not messages[0].media:
+            await answer(message, "El archivo ya no está disponible.")
+            return
+        # Reenvío directo: entrega exactamente el archivo seleccionado, sin descargarlo.
+        await client.forward_messages(message.chat_id, message_id, dialog_id)
+        await answer(message, f"✅ Archivo enviado: {item.get('name') or item.get('title')}")
+    except Exception as exc:  # noqa: BLE001
+        await answer(message, f"No se pudo enviar: {type(exc).__name__}. Enlace: {link}")
+
+
+async def cancel_deep_search(message: Message) -> None:
+    search_id, _ = await _get_pending_files(message.chat_id)
+    if not search_id:
+        await answer(message, "No hay una búsqueda profunda reciente.")
+        return
+    async with get_sessionmaker()() as db:
+        result = await db.execute(select(FileSearch).where(FileSearch.id == search_id))
+        search = result.scalar_one_or_none()
+        if search:
+            search.cancel_requested = True
+            await db.commit()
+    await answer(message, "🛑 Cancelación solicitada.")
+
+
 async def process_group(images: list[bytes], texts: list[str], message: Message) -> None:
     query = " ".join(t for t in texts if t and not t.startswith("!")).strip()
     await handle_busca(message, query, images)
@@ -362,6 +487,17 @@ def register_handlers(client: Any) -> None:
         images = await download_images(messages)
         texts = [m.text or "" for m in messages]
         await process_group(images, texts, first)
+
+    async def _flush_deep_album(group_id: str) -> None:
+        await asyncio.sleep(ALBUM_DEBOUNCE_SECONDS)
+        messages = albums.pop(group_id, [])
+        album_tasks.pop(group_id, None)
+        if not messages:
+            return
+        first = messages[0]
+        images = await download_images(messages)
+        text = " ".join((m.text or "") for m in messages if not (m.text or "").startswith("!"))
+        await start_deep_search(first, text.strip(), images)
 
     @client.on(events.NewMessage())
     async def handler(event: events.NewMessage.Event) -> None:
@@ -419,6 +555,25 @@ def register_handlers(client: Any) -> None:
                 await deliver_selected_media(
                     message.chat_id, sender_id or 0, None, int(parts[0]) - 1
                 )
+        elif command == "!archivos":
+            if message.grouped_id:
+                group_id = str(message.grouped_id)
+                albums[group_id].append(message)
+                if group_id in album_tasks:
+                    album_tasks[group_id].cancel()
+                album_tasks[group_id] = asyncio.create_task(_flush_deep_album(group_id))
+                return
+            async with get_sessionmaker()() as db:
+                if not await register_event(db, message, []):
+                    return
+                await db.commit()
+            await start_deep_search(message, argument, await download_images([message]))
+        elif command == "!infoarchivo":
+            await show_file_info(message, argument.strip())
+        elif command == "!enviararchivo":
+            await deliver_indexed_file(message, argument.strip())
+        elif command == "!cancelar":
+            await cancel_deep_search(message)
 
     @client.on(events.CallbackQuery(pattern=rb"^cfmedia:"))
     async def media_callback(event: events.CallbackQuery.Event) -> None:

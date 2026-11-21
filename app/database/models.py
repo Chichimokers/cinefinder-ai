@@ -359,3 +359,166 @@ class SystemSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+
+# ---------------------------------------------------------------------------
+# Motor de búsqueda profunda en Telegram
+# ---------------------------------------------------------------------------
+
+class TelegramDialog(Base):
+    __tablename__ = "telegram_dialogs"
+    __table_args__ = (
+        Index("ix_telegram_dialogs_type", "dialog_type"),
+        Index("ix_telegram_dialogs_scan", "scan_status", "last_scan_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dialog_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
+    title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    username: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    dialog_type: Mapped[str] = mapped_column(String(32), default="unknown", nullable=False)
+    is_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_restricted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    access_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_scanned_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    last_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    scan_status: Mapped[str] = mapped_column(String(24), default="pending", nullable=False)
+    messages_scanned: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class TelegramMessageIndex(Base):
+    __tablename__ = "telegram_messages_index"
+    __table_args__ = (
+        UniqueConstraint("dialog_id", "message_id", name="uq_telegram_index_dialog_msg"),
+        Index("ix_telegram_index_file_name", "file_name"),
+        Index("ix_telegram_index_date", "date"),
+        Index("ix_telegram_index_media", "has_media"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dialog_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    caption: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sender_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    has_media: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    media_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    file_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    duration: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reply_to: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    indexed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class IndexedFile(Base):
+    __tablename__ = "indexed_files"
+    __table_args__ = (
+        UniqueConstraint("file_key", name="uq_indexed_files_file_key"),
+        Index("ix_indexed_files_title", "title"),
+        Index("ix_indexed_files_extension", "extension"),
+        Index("ix_indexed_files_status", "indexing_status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    file_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    dialog_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    original_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    category: Mapped[str] = mapped_column(String(32), default="other", nullable=False)
+    extension: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    telegram_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    catalog_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    indexing_status: Mapped[str] = mapped_column(String(24), default="indexed", nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class FileSearch(Base):
+    __tablename__ = "file_searches"
+    __table_args__ = (Index("ix_file_searches_status", "status", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    status: Mapped[str] = mapped_column(String(24), default="queued", nullable=False)
+    requester_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    query: Mapped[str | None] = mapped_column(Text, nullable=True)
+    query_variants: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    image_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    image_features: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    scope: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    stage: Mapped[str] = mapped_column(String(48), default="queued", nullable=False)
+    dialogs_total: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    dialogs_done: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    messages_scanned: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    files_found: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class FileSearchResult(Base):
+    __tablename__ = "file_search_results"
+    __table_args__ = (Index("ix_file_search_results_search_score", "search_id", "score"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    search_id: Mapped[str] = mapped_column(ForeignKey("file_searches.id", ondelete="CASCADE"), nullable=False)
+    indexed_file_id: Mapped[int] = mapped_column(ForeignKey("indexed_files.id"), nullable=False)
+    score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    matched_variant: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    matched_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class IndexingJob(Base):
+    __tablename__ = "indexing_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    search_id: Mapped[str | None] = mapped_column(ForeignKey("file_searches.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="queued", nullable=False)
+    files_indexed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    duplicates: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    errors: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class TelegramMediaReference(Base):
+    __tablename__ = "telegram_media_references"
+    __table_args__ = (
+        UniqueConstraint("dialog_id", "message_id", name="uq_media_ref_dialog_msg"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dialog_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    file_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    telegram_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    indexed_file_id: Mapped[int | None] = mapped_column(ForeignKey("indexed_files.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

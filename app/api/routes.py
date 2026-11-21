@@ -12,8 +12,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from app.api.deps import require_auth
-from app.database.models import AgentTask, Movie, SearchHistory, SearchJob
+from app.database.models import AgentTask, FileSearch, FileSearchResult, Movie, SearchHistory, SearchJob
 from app.database.session import check_database, get_sessionmaker
+from app.services.telegram_deep_search import create_file_search
+from app.workers.deep_search_worker import run_deep_search_job
 from app.services.jobs import create_job, get_job, job_to_dict, recover_stalled_jobs, set_status
 from app.services.research import run_search_job
 from app.utils.logging import get_logger
@@ -280,6 +282,69 @@ async def admin_reindex(_: str = Depends(require_auth)) -> dict:
         recovered = await recover_stalled_jobs(db)
         await db.commit()
     return {"recovered_jobs": recovered, "message": "Trabajos interrumpidos reencolados"}
+
+
+class FileSearchRequest(BaseModel):
+    query: str
+    aliases: list[str] = Field(default_factory=list)
+    year: int | None = None
+    async_mode: bool = Field(default=True, alias="async")
+
+    model_config = {"populate_by_name": True}
+
+
+@router.post("/files/search")
+async def search_files(payload: FileSearchRequest, background_tasks: BackgroundTasks, _: str = Depends(require_auth)):
+    async with get_sessionmaker()() as db:
+        search = await create_file_search(
+            db, payload.query, requester_id="api", aliases=payload.aliases, year=payload.year
+        )
+        await db.commit()
+        search_id = search.id
+    if payload.async_mode:
+        background_tasks.add_task(run_deep_search_job, search_id)
+        return JSONResponse(status_code=202, content={"search_id": search_id, "status": "queued"})
+    result = await run_deep_search_job(search_id)
+    return JSONResponse(status_code=200, content=result or {"search_id": search_id, "status": "failed"})
+
+
+@router.get("/files/searches/{search_id}")
+async def get_file_search(search_id: str, _: str = Depends(require_auth)) -> dict:
+    async with get_sessionmaker()() as db:
+        search = await db.get(FileSearch, search_id)
+        if search is None:
+            raise HTTPException(status_code=404, detail="Búsqueda no encontrada")
+        res = await db.execute(
+            select(FileSearchResult).where(FileSearchResult.search_id == search_id)
+            .order_by(FileSearchResult.score.desc()).limit(40)
+        )
+    return {
+        "search_id": search.id,
+        "status": search.status,
+        "stage": search.stage,
+        "query": search.query,
+        "variants": search.query_variants,
+        "dialogs_total": search.dialogs_total,
+        "dialogs_done": search.dialogs_done,
+        "messages_scanned": search.messages_scanned,
+        "files_found": search.files_found,
+        "error": search.error,
+        "results": [
+            {"indexed_file_id": r.indexed_file_id, "score": r.score, "matched": r.matched_text}
+            for r in res.scalars().all()
+        ],
+    }
+
+
+@router.post("/files/searches/{search_id}/cancel")
+async def cancel_file_search(search_id: str, _: str = Depends(require_auth)) -> dict:
+    async with get_sessionmaker()() as db:
+        search = await db.get(FileSearch, search_id)
+        if search is None:
+            raise HTTPException(status_code=404, detail="Búsqueda no encontrada")
+        search.cancel_requested = True
+        await db.commit()
+    return {"search_id": search_id, "cancel_requested": True}
 
 
 @router.get("/openapi.json")
