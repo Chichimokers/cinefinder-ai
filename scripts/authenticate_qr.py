@@ -46,6 +46,16 @@ def _print_qr(url: str, attempt: int) -> None:
     print("(si expira, aparecerá uno nuevo automáticamente)")
 
 
+async def _handle_2fa(client: TelegramClient) -> None:
+    """Pide la contraseña de verificación en dos pasos por entrada oculta."""
+    import getpass
+
+    print("\nTu cuenta tiene verificación en dos pasos activada.")
+    password = getpass.getpass("Contraseña 2FA de Telegram (oculta): ").strip()
+    await client.sign_in(password=password)
+    print("Verificación en dos pasos completada.")
+
+
 async def _wait_scan(login, timeout: int = 25) -> bool:
     """Espera el escaneo con un timeout corto para poder renovar el QR."""
     try:
@@ -83,7 +93,13 @@ async def main() -> int:
             else:
                 wait_for = 25
             print(f"\nEste QR caduca en ~{int(remaining) if expires else 30}s. Esperando escaneo…")
-            scanned = await _wait_scan(login, timeout=wait_for)
+            try:
+                scanned = await _wait_scan(login, timeout=wait_for)
+            except SessionPasswordNeededError:
+                # 2FA se dispara al importar el token, dentro de login.wait().
+                scanned = True
+                await _handle_2fa(client)
+                break
             if scanned:
                 break
             print("\nQR caducado o sin escanear; generando uno nuevo…")
@@ -99,10 +115,7 @@ async def main() -> int:
         try:
             me = await client.get_me()
         except SessionPasswordNeededError:
-            import getpass
-
-            password = getpass.getpass("Contraseña de verificación en dos pasos (oculta): ").strip()
-            await client.sign_in(password=password)
+            await _handle_2fa(client)
             me = await client.get_me()
 
         return await _finish(client, me)
