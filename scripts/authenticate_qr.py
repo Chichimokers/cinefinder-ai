@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Autenticación del userbot por QR (alternativa al código OTP).
+"""Autenticación del userbot por QR con renovación automática del token.
 
-Telegram entrega el código SOLO dentro de la app oficial (SentCodeTypeApp),
-nunca por SMS. Si no ves el código, este método evita escribirlo: genera un
-QR que se escanea desde la propia app de Telegram.
+Telegram caduca el token QR en ~30-60 s. Este script muestra el QR y lo
+REGENERA automáticamente antes de que expire, para que puedas escanearlo
+con calma desde la app oficial de Telegram.
 
-Pasos en el teléfono:
-  Telegram → Configuración (☰) → Dispositivos → Vincular dispositivo → + → escanear QR
+En el teléfono:
+  Telegram → ☰ → Dispositivos → Vincular dispositivo → + → escanear el QR
 
 Uso: py -3.12 scripts/authenticate_qr.py
 """
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from pathlib import Path
+from datetime import datetime, timezone
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -27,19 +27,31 @@ from app.config import settings
 from scripts.setup_credentials import write_env
 
 
-async def _print_qr(url: str) -> None:
+def _print_qr(url: str, attempt: int) -> None:
+    print("\n" + "=" * 60)
+    print(f"QR #{attempt} — escanéalo AHORA con tu app de Telegram")
+    print("=" * 60)
     try:
         import qrcode
 
         qr = qrcode.QRCode(border=2, box_size=6)
         qr.add_data(url)
         qr.make(fit=True)
-        print("\n=== ESCANEA ESTE QR CON TU APP DE TELEGRAM ===\n")
         qr.print_ascii(invert=True)
     except ImportError:
-        print("\nURL de vinculación (ábrela en la app de Telegram):")
+        print("URL de vinculación (ábrela en la app de Telegram):")
         print(url)
-    print("\nEn Telegram: ☰ → Dispositivos → Vincular dispositivo → + → escanear")
+    print("\nTelegram → ☰ → Dispositivos → Vincular dispositivo → + → escanear")
+    print("(si expira, aparecerá uno nuevo automáticamente)")
+
+
+async def _wait_scan(login, timeout: int = 25) -> bool:
+    """Espera el escaneo con un timeout corto para poder renovar el QR."""
+    try:
+        await login.wait(timeout=timeout)
+        return True
+    except asyncio.TimeoutError:
+        return False
 
 
 async def main() -> int:
@@ -51,16 +63,37 @@ async def main() -> int:
     try:
         await client.connect()
         if await client.is_user_authorized():
-            print("Ya hay una sesión autorizada en memoria; no hace falta QR.")
-            me = await client.get_me()
-            return await _finish(client, me)
+            print("Ya hay una sesión autorizada en memoria.")
+            return await _finish(client, await client.get_me())
 
-        print("Solicitando código QR a Telegram…")
         login = await client.qr_login()
-        await _print_qr(login.url)
+        attempt = 0
+        scanned = False
 
-        print("\nEsperando a que escanees el QR (hasta 120 s)…")
-        await login.wait(timeout=120)
+        # Renovar el QR en bucle hasta que se escanee (máx. 6 minutos).
+        deadline = asyncio.get_event_loop().time() + 360
+        while asyncio.get_event_loop().time() < deadline:
+            attempt += 1
+            _print_qr(login.url, attempt)
+            expires = getattr(login, "expires", None)
+            if expires:
+                remaining = (expires - datetime.now(timezone.utc)).total_seconds()
+                wait_for = max(5, min(int(remaining) - 3, 25))
+            else:
+                wait_for = 25
+            print(f"\nEste QR caduca en ~{int(remaining) if expires else 30}s. Esperando escaneo…")
+            scanned = await _wait_scan(login, timeout=wait_for)
+            if scanned:
+                break
+            print("\nQR caducado o sin escanear; generando uno nuevo…")
+            try:
+                await login.recreate()
+            except Exception:  # noqa: BLE001
+                login = await client.qr_login()
+
+        if not scanned:
+            print("No se detectó ningún escaneo. Vuelve a ejecutar el script.")
+            return 1
 
         try:
             me = await client.get_me()
@@ -73,8 +106,7 @@ async def main() -> int:
 
         return await _finish(client, me)
     except Exception as exc:  # noqa: BLE001
-        print(f"Autenticación por QR fallida: {type(exc).__name__}")
-        print("Si Telegram indicó 'espera', vuelve a intentarlo en unos minutos.")
+        print(f"Autenticación por QR fallida: {type(exc).__name__} — {str(exc)[:120]}")
         return 1
     finally:
         if client.is_connected():
