@@ -119,8 +119,11 @@ El número configurado es `+5358126024` (`TELEGRAM_PHONE`). Si al autenticar ese
 
 | Comando | Función |
 |---|---|
-| `!busca [texto]` | Investiga texto, fotos, capturas o álbumes |
-| *(enviar una foto o álbum sin comando)* | Inicia la investigación automáticamente |
+| `!busca [texto]` | Busca por texto (también `!busca ;texto`) |
+| `!busca` + foto/álbum adjunto | Identifica la imagen |
+| `!busca` respondiendo a una foto | Identifica esa foto |
+
+> **Siempre con comando:** los mensajes sin comando se ignoran. Además, el bot **ignora por completo Mensajes Guardados** (chat consigo mismo): no investiga ni responde comandos en ese chat. Úsalo en un chat privado con tu cuenta autorizada.
 | `!info CF-000001` | Ficha de una película |
 | `!stats` | Estadísticas del catálogo |
 | `!ultimas` | Últimas incorporaciones |
@@ -134,7 +137,7 @@ Durante `!busca` el bot crea **un único mensaje** y lo va actualizando en vivo 
 
 Si se encuentran archivos, la lista numerada y los botones aparecen en ese mismo mensaje. Puedes responder **solamente con el número** (`1`, `2`…) o usar `!enviar <n>` / `!enviararchivo <n>` para recibir exactamente el archivo elegido; la confirmación incluye el enlace al mensaje original.
 
-Además, **no necesitas escribir ningún comando para buscar una imagen**: envía una foto o un álbum directamente y el bot inicia la investigación igual que con `!busca`. El texto del pie de la foto se usa como descripción adicional. También puedes autorizar usuarios con `py -3.12 scripts\authorize_user.py <ID> --username nombre`.
+Para buscar sobre una imagen, **siempre usa `!busca`**: adjunta la foto/álbum al comando, o responde a un mensaje que contenga la foto con `!busca`. También admite descripción con `!busca ;descripción`. También puedes autorizar usuarios con `py -3.12 scripts\authorize_user.py <ID> --username nombre`.
 
 #### Búsqueda global en Telegram (solo propietario)
 

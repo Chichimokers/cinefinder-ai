@@ -47,7 +47,13 @@ MAX_MEDIA_OFFERS = 5
 ALBUM_DEBOUNCE_SECONDS = 1.5
 
 HELP = """🤖 CineFinder AI — Comandos
-!busca [texto] — busca por texto e imágenes (responde con fotos)
+(siempre usa un comando; los mensajes sin comando se ignoran)
+
+!busca [texto] — busca por texto
+!busca ;texto — busca con descripción
+!busca (adjunta foto/álbum) — identifica la imagen
+!busca (respondiendo a una foto) — identifica esa foto
+!archivos [texto] — búsqueda profunda en Telegram
 !info CF-000001 — ficha de una película
 !stats — estadísticas del catálogo
 !ultimas — últimas incorporationes
@@ -64,6 +70,21 @@ HELP = """🤖 CineFinder AI — Comandos
 !cancelar — cancela la búsqueda profunda en curso
 !ayuda — este mensaje
 """
+
+
+_self_id: int | None = None
+
+
+async def _get_self_id() -> int | None:
+    """ID de la cuenta userbot, para ignorar Mensajes Guardados."""
+    global _self_id
+    if _self_id is None:
+        client = get_telegram_client()
+        if client and client.is_connected():
+            me = await client.get_me()
+            if me:
+                _self_id = int(me.id)
+    return _self_id
 
 
 async def is_authorized(db: AsyncSession, user_id: int) -> bool:
@@ -596,32 +617,18 @@ def register_handlers(client: Any) -> None:
         text = " ".join((m.text or "") for m in messages if not (m.text or "").startswith("!"))
         await start_deep_search(first, text.strip(), images)
 
-    async def _flush_auto_album(group_id: str) -> None:
-        """Álbum enviado sin comando: se investiga automáticamente con !busca."""
-        await asyncio.sleep(ALBUM_DEBOUNCE_SECONDS)
-        messages = albums.pop(group_id, [])
-        album_tasks.pop(group_id, None)
-        if not messages:
-            return
-        first = messages[0]
-        async with get_sessionmaker()() as db:
-            if not await register_event(db, first, []):
-                return
-            await db.commit()
-        images = await download_images(messages)
-        captions = [
-            (m.text or "").strip()
-            for m in messages
-            if (m.text or "").strip() and not (m.text or "").startswith("!")
-        ]
-        await handle_busca(first, " ".join(captions).strip(), images)
-
     @client.on(events.NewMessage())
     async def handler(event: events.NewMessage.Event) -> None:
         message = event.message
         if not message:
             return
         sender_id = getattr(message, "sender_id", None)
+
+        # Mensajes Guardados (chat consigo mismo) se ignoran por completo:
+        # no se investiga nada ni se responde comandos en ese chat.
+        me = await _get_self_id()
+        if me and message.chat_id == me:
+            return
 
         # Validación de acceso en CADA interacción.
         async with get_sessionmaker()() as db:
@@ -664,47 +671,31 @@ def register_handlers(client: Any) -> None:
             await answer(message, "ℹ️ No hay una selección pendiente. Usa !archivos o !busca primero.")
             return
 
-        # Foto o álbum enviado SIN comando: se investiga automáticamente.
-        has_image = bool(getattr(message, "photo", None) or getattr(message, "media", None))
-        if has_image:
-            if message.grouped_id:
-                group_id = str(message.grouped_id)
-                albums[group_id].append(message)
-                if group_id in album_tasks:
-                    album_tasks[group_id].cancel()
-                album_tasks[group_id] = asyncio.create_task(_flush_auto_album(group_id))
-                return
-            async with get_sessionmaker()() as db:
-                if not await register_event(db, message, []):
-                    return
-                await db.commit()
-            images = await download_images([message])
-            if images:
-                caption = (message.text or "").strip()
-                await handle_busca(message, caption, images)
-                return
-
-        # Texto sin comando: si hay una selección pendiente se interpreta como
-        # descripción adicional; si no, se sugiere usar !busca.
-        if command not in COMMANDS and text.strip():
-            _, deep_results = await _get_pending_files(message.chat_id, sender_id)
-            if deep_results:
-                await answer(
-                    message,
-                    "ℹ️ Tienes una búsqueda pendiente. Responde con el número del archivo "
-                    "o usa !infoarchivo <n>.",
-                )
-            else:
-                await answer(
-                    message,
-                    "📷 Envíame una foto o un álbum y lo investigo, o usa !busca [texto] / !archivos [texto].",
-                )
-            return
-
+        # Sin comando no se hace nada: siempre se exige !busca / !archivos,
+        # incluso para fotos, álbumes y texto.
         if command not in COMMANDS:
             return
 
         if command == "!busca":
+            # Normalizar el separador opcional: !busca ;texto  →  texto
+            argument = argument.strip()
+            if argument.startswith(";"):
+                argument = argument[1:].strip()
+
+            # Si se responde a un mensaje con foto, se usa la imagen de ese mensaje.
+            reply = getattr(message, "reply_to_message", None)
+            if reply is not None and getattr(reply, "media", None):
+                images = await download_images([reply])
+                if images:
+                    if not argument:
+                        argument = (reply.text or "").strip()
+                    async with get_sessionmaker()() as db:
+                        if not await register_event(db, message, []):
+                            return
+                        await db.commit()
+                    await handle_busca(message, argument, images)
+                    return
+
             if message.grouped_id:
                 group_id = str(message.grouped_id)
                 albums[group_id].append(message)
