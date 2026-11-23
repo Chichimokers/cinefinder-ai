@@ -36,9 +36,11 @@ from app.utils.security import hash_image
 logger = get_logger(__name__)
 
 COMMANDS = (
-    "!busca", "!info", "!stats", "!ultimas", "!ayuda", "!estado",
-    "!enviar", "!archivos", "!infoarchivo", "!enviararchivo", "!cancelar",
+    "!busca", "!buscar", "!info", "!stats", "!ultimas", "!ayuda", "!estado",
+    "!enviar", "!archivos", "!archivo", "!infoarchivo", "!enviararchivo", "!cancelar",
 )
+# Alias: cualquier variante se normaliza a su comando canónico.
+COMMAND_ALIASES = {"!buscar": "!busca", "!archivo": "!archivos"}
 ADMIN_COMMANDS = {
     "/autorizar", "!autorizar", "/desautorizar", "!desautorizar",
     "/autorizados", "!autorizados", "/info", "!infoadmin", "/id", "!id",
@@ -49,10 +51,11 @@ ALBUM_DEBOUNCE_SECONDS = 1.5
 HELP = """🤖 CineFinder AI — Comandos
 (siempre usa un comando; los mensajes sin comando se ignoran)
 
-!busca [texto] — busca por texto
+!busca / !buscar [texto] — busca por texto
 !busca ;texto — busca con descripción
 !busca (adjunta foto/álbum) — identifica la imagen
 !busca (respondiendo a una foto) — identifica esa foto
+(responder a una foto y escribir !busca también funciona)
 !archivos [texto] — búsqueda profunda en Telegram
 !info CF-000001 — ficha de una película
 !stats — estadísticas del catálogo
@@ -411,17 +414,9 @@ async def deliver_selected_media(chat_id: int, sender_id: int, job_id: str | Non
         source = source_result.scalar_one_or_none()
 
     link = _telegram_link(item["chat_id"], item["message_id"])
-    # El propietario tiene acceso absoluto a los datos de su propia cuenta.
-    allowed = source is not None or is_owner_id(sender_id)
-    if not allowed:
-        await answer_safe(
-            chat_id,
-            "⚠️ Ese chat no está registrado como fuente autorizada para entrega automática.\n"
-            f"Te dejo el enlace al mensaje original: {link}\n"
-            "Para autorizarlo: py -3.12 scripts\\authorize_source.py "
-            f"{item['chat_id']} --name \"{item.get('chat', 'canal')}\"",
-        )
-        return
+    # El acceso ya fue validado arriba (propietario o usuario autorizado),
+    # por lo que cualquier usuario con acceso puede recibir el archivo.
+    # La fuente registrada solo aporta trazabilidad, no bloquea la entrega.
 
     client = get_telegram_client()
     if client is None or not client.is_connected():
@@ -439,7 +434,7 @@ async def deliver_selected_media(chat_id: int, sender_id: int, job_id: str | Non
         import hashlib
 
         digest = hashlib.sha256(data).hexdigest()
-        source_name = source.name if source else "tu cuenta (propietario)"
+        source_name = source.name if source else "tus chats autorizados"
         caption = f"📦 Archivo autorizado · fuente: {source_name}\nSHA-256: {digest}"
         await client.send_file(chat_id, data, caption=caption)
         await answer_safe(chat_id, f"✅ Enviado. Origen: {link}")
@@ -537,16 +532,8 @@ async def deliver_indexed_file(message: Message, argument: str) -> None:
         source = source_result.scalar_one_or_none()
 
     link = _telegram_link(dialog_id, message_id)
-    # El propietario puede recuperar archivos de sus propios chats sin registro extra.
-    allowed = source is not None or is_owner_id(message.sender_id)
-    if not allowed:
-        await answer(
-            message,
-            "⚠️ Ese chat no está autorizado para entrega automática. "
-            f"Enlace al original: {link}\n"
-            f"Autorízalo con: py -3.12 scripts\\authorize_source.py {dialog_id}",
-        )
-        return
+    # El acceso ya fue validado arriba: propietario o usuario autorizado
+    # pueden recibir el archivo; el registro de fuente es solo trazabilidad.
 
     client = get_telegram_client()
     if client is None or not client.is_connected():
@@ -638,6 +625,8 @@ def register_handlers(client: Any) -> None:
         parts = text.strip().split(maxsplit=1)
         command = parts[0].lower() if parts else ""
         argument = parts[1] if len(parts) > 1 else ""
+        # Normalizar alias de comandos (!buscar -> !busca, !archivo -> !archivos).
+        command = COMMAND_ALIASES.get(command, command)
 
         # Comandos administrativos (solo propietario), incluso para usuarios sin autorizar.
         if command in ADMIN_COMMANDS:

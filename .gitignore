@@ -3,8 +3,6 @@
 # ============================================================
 
 # Secretos locales (contienen credenciales reales)
-.env.local
-.env
 .env.*.local
 *.key
 *.pem
@@ -41,7 +39,6 @@ coverage.xml
 *.sqlite3
 
 # IDE / SO
-.vscode/
 .idea/
 *.swp
 .DS_Store
@@ -55,3 +52,5 @@ logs/
 tmp/
 temp/
 .cache/
+config.bat
+node_modules

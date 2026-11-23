@@ -36,6 +36,15 @@ def test_username_validation():
     assert result["ok"] is False
 
 
+def test_command_aliases():
+    from app.workers.telegram_worker import COMMAND_ALIASES, COMMANDS
+
+    assert COMMAND_ALIASES["!buscar"] == "!busca"
+    assert COMMAND_ALIASES["!archivo"] == "!archivos"
+    assert "!buscar" in COMMANDS
+    assert "!busca" in COMMANDS
+
+
 def test_pending_key_is_per_user():
     """Los resultados no deben cruzarse entre usuarios (chat distinto, mismo ID)."""
     import asyncio
